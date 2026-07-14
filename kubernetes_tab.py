@@ -305,7 +305,7 @@ class KubernetesTab(QWidget):
         self.svc_hdr = QLabel("  Services")
         self.svc_hdr.setFixedHeight(30)
         self.svc_hdr.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 11px; "
+            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
         )
         sg.addWidget(self.svc_hdr)
@@ -331,7 +331,7 @@ class KubernetesTab(QWidget):
         self.ing_hdr = QLabel("  Ingress")
         self.ing_hdr.setFixedHeight(30)
         self.ing_hdr.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 11px; "
+            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
         )
         ig.addWidget(self.ing_hdr)
@@ -396,7 +396,7 @@ class KubernetesTab(QWidget):
         self.cfg_detail_hdr = QLabel("  Data")
         self.cfg_detail_hdr.setFixedHeight(30)
         self.cfg_detail_hdr.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 11px; "
+            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
         )
         rl.addWidget(self.cfg_detail_hdr)
@@ -413,7 +413,7 @@ class KubernetesTab(QWidget):
         self.cfg_raw_lbl = QLabel("  Structured View")
         self.cfg_raw_lbl.setFixedHeight(30)
         self.cfg_raw_lbl.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 11px; "
+            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-top: 1px solid {T['BORDER']}; "
             f"border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
         )
@@ -473,7 +473,7 @@ class KubernetesTab(QWidget):
         tb.setSpacing(8)
 
         self.tunnel_path_lbl = QLabel(f"📄  {REMOTE_TUNNEL_CSV_PATH}  (on VM)")
-        self.tunnel_path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px;")
+        self.tunnel_path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         tb.addWidget(self.tunnel_path_lbl)
         tb.addStretch()
 
@@ -611,13 +611,13 @@ class KubernetesTab(QWidget):
                 f"background: #0d0d1a; color: {T['TEXT_DIM']}; border: none; padding: 8px;"
             )
         if getattr(self, "tunnel_path_lbl", None) is not None:
-            self.tunnel_path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px;")
+            self.tunnel_path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         if getattr(self, "tunnel_status_lbl", None) is not None:
             running = self._tunnel_process is not None and self._tunnel_process.state() != QProcess.NotRunning
             color = T['SUCCESS'] if running else T['TEXT_MUTED']
             self.tunnel_status_lbl.setStyleSheet(f"color: {color}; font-size: 12px;")
         header_style = (
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 11px; "
+            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
         )
         for lbl in (getattr(self, "svc_hdr", None), getattr(self, "ing_hdr", None),
@@ -630,7 +630,7 @@ class KubernetesTab(QWidget):
             )
         if getattr(self, "cfg_raw_lbl", None) is not None:
             self.cfg_raw_lbl.setStyleSheet(
-                f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 11px; "
+                f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
                 f"font-weight: 700; border-top: 1px solid {T['BORDER']}; "
                 f"border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
             )
@@ -1345,7 +1345,7 @@ class KubernetesTab(QWidget):
             container_port = svc.get("container_port", port)
             ns = svc["namespace"]
 
-            cmds.append(f"/home/ubuntu/kill_kubectl_port.sh {port}")
+            cmds.append(f"kill {port}")
             cmds.append(
                 f"nohup kubectl -n {ns} port-forward svc/{name} "
                 f"{port}:{container_port} > /dev/null 2>&1 &"

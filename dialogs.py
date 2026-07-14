@@ -86,21 +86,21 @@ class FileTransferDialog(QDialog):
         stats_row = QHBoxLayout()
         stats_row.setSpacing(0)
         self.xfer_lbl  = QLabel("0 B / —")
-        self.xfer_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px; background: transparent;")
+        self.xfer_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px; background: transparent;")
         stats_row.addWidget(self.xfer_lbl)
         stats_row.addStretch()
         self.speed_lbl = QLabel("")
-        self.speed_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px; background: transparent;")
+        self.speed_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px; background: transparent;")
         stats_row.addWidget(self.speed_lbl)
         stats_row.addSpacing(16)
         self.eta_lbl   = QLabel("")
-        self.eta_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px; background: transparent;")
+        self.eta_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px; background: transparent;")
         stats_row.addWidget(self.eta_lbl)
         lay.addLayout(stats_row)
 
         dest = remote_path if direction == "upload" else local_path
         dest_lbl = QLabel(f"To:  {dest}")
-        dest_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px; background: transparent;")
+        dest_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 13px; background: transparent;")
         dest_lbl.setWordWrap(True)
         lay.addWidget(dest_lbl)
 
@@ -410,7 +410,7 @@ class ConnectingDialog(QDialog):
 
         sub_lbl = QLabel("This may take a few seconds…")
         sub_lbl.setAlignment(Qt.AlignCenter)
-        sub_lbl.setStyleSheet(f"background: transparent; color: {T['TEXT_DIM']}; font-size: 11px;")
+        sub_lbl.setStyleSheet(f"background: transparent; color: {T['TEXT_DIM']}; font-size: 13px;")
         layout.addWidget(sub_lbl)
 
     def set_status(self, text: str):
@@ -702,7 +702,7 @@ class FileEditorDialog(QDialog):
         tb.setSpacing(6)
 
         path_lbl = QLabel(remote_path)
-        path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px;")
+        path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         tb.addWidget(path_lbl)
         tb.addStretch()
 
@@ -777,7 +777,7 @@ class FileEditorDialog(QDialog):
             fb.addWidget(b)
 
         self._match_lbl = QLabel("")
-        self._match_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px;")
+        self._match_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         fb.addWidget(self._match_lbl)
         fb.addStretch()
 
@@ -833,17 +833,17 @@ class FileEditorDialog(QDialog):
         sb.setSpacing(16)
 
         self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px;")
+        self._status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 13px;")
         sb.addWidget(self._status_lbl)
         sb.addStretch()
 
         self._cursor_lbl = QLabel("Ln 1, Col 1")
-        self._cursor_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px;")
+        self._cursor_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         sb.addWidget(self._cursor_lbl)
 
         ext = os.path.splitext(fname)[1].lower()
         lang_lbl = QLabel(ext.lstrip(".").upper() if ext else "TXT")
-        lang_lbl.setStyleSheet(f"color: {T['ACCENT2']}; font-size: 11px; font-weight: 600;")
+        lang_lbl.setStyleSheet(f"color: {T['ACCENT2']}; font-size: 13px; font-weight: 600;")
         sb.addWidget(lang_lbl)
         lay.addWidget(sb_widget)
 
@@ -890,7 +890,7 @@ class FileEditorDialog(QDialog):
     def _set_status(self, msg, color=None):
         self._status_lbl.setText(msg)
         self._status_lbl.setStyleSheet(
-            f"color: {color or T['TEXT_MUTED']}; font-size: 11px;"
+            f"color: {color or T['TEXT_MUTED']}; font-size: 13px;"
         )
 
     # ── Find / Replace ────────────────────────────────────────
@@ -1285,7 +1285,7 @@ class FileExecDialog(QDialog):
         sb.setSpacing(0)
 
         self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px;")
+        self._status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 13px;")
         sb.addWidget(self._status_lbl)
         sb.addStretch()
 
@@ -1423,7 +1423,7 @@ class FileExecDialog(QDialog):
     def _set_status(self, msg, color=None):
         self._status_lbl.setText(msg)
         self._status_lbl.setStyleSheet(
-            f"color: {color or T['TEXT_MUTED']}; font-size: 11px;"
+            f"color: {color or T['TEXT_MUTED']}; font-size: 13px;"
         )
 
 
@@ -1523,7 +1523,7 @@ class SearchDialog(QDialog):
 
         or_lay.addStretch()
         self._result_count_lbl = QLabel("")
-        self._result_count_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px;")
+        self._result_count_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         or_lay.addWidget(self._result_count_lbl)
         lay.addWidget(self._opts_row)
 
@@ -1548,7 +1548,7 @@ class SearchDialog(QDialog):
         sb_lay = QHBoxLayout(sb)
         sb_lay.setContentsMargins(12, 0, 12, 0)
         self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px;")
+        self._status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 13px;")
         sb_lay.addWidget(self._status_lbl)
         sb_lay.addStretch()
         self._progress = QProgressBar()

@@ -76,7 +76,7 @@ class FileGridWidget(QWidget):
         name_lbl = QLabel(meta["name"])
         name_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         name_lbl.setWordWrap(True)
-        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 11px;")
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 13px;")
         name_lbl.setMaximumHeight(36)
         layout.addWidget(name_lbl)
 

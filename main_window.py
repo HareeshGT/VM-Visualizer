@@ -133,7 +133,7 @@ class EC2FileManager(QMainWindow):
 
         def _lbl(text):
             l = QLabel(text)
-            l.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px;")
+            l.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 13px;")
             return l
 
         # Nav buttons (FM-only)
@@ -434,7 +434,7 @@ class EC2FileManager(QMainWindow):
         def _lbl(text, align=Qt.AlignLeft | Qt.AlignVCenter):
             l = QLabel(text)
             l.setStyleSheet(
-                "color: {}; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;".format(
+                "color: {}; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;".format(
                     T['TEXT_MUTED'])
             )
             l.setAlignment(align)
@@ -1217,7 +1217,7 @@ class EC2FileManager(QMainWindow):
             self.sudo_badge.setStyleSheet(
                 "color: {w}; background: rgba(251,191,36,0.15); "
                 "border: 1px solid rgba(251,191,36,0.4); border-radius: 8px; "
-                "padding: 1px 6px; font-size: 11px; font-weight: 600;".format(w=T['WARNING'])
+                "padding: 1px 6px; font-size: 13px; font-weight: 600;".format(w=T['WARNING'])
             )
             self.sudo_badge.show()
         else:

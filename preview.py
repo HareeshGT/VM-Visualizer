@@ -52,7 +52,7 @@ class PreviewPane(QWidget):
     def _apply_styles(self):
         self.header.setStyleSheet(
             f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; "
-            f"border-bottom: 1px solid {T['BORDER']}; font-size: 11px; "
+            f"border-bottom: 1px solid {T['BORDER']}; font-size: 13px; "
             f"font-weight: 700; letter-spacing: 1px; padding-left: 12px;"
         )
         self.icon_lbl.setStyleSheet(f"background: {T['BG_PANEL']};")
@@ -62,7 +62,7 @@ class PreviewPane(QWidget):
         )
         self.meta_lbl.setStyleSheet(
             f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; "
-            f"font-size: 11px; padding: 2px 12px 8px 12px;"
+            f"font-size: 13px; padding: 2px 12px 8px 12px;"
         )
 
     def refresh_theme(self):

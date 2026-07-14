@@ -208,7 +208,7 @@ def build_qss() -> str:
     QHeaderView::section {{
         background: {c['BG_PANEL']}; color: {c['TEXT_MUTED']};
         border: none; border-bottom: 1px solid {c['BORDER']};
-        padding: 6px 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+        padding: 6px 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
     }}
     QTableWidget {{
         background: {c['BG_DARK']}; color: {c['TEXT_PRIMARY']};
@@ -230,7 +230,7 @@ def build_qss() -> str:
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
     QStatusBar {{
         background: {c['BG_PANEL']}; color: {c['TEXT_DIM']};
-        border-top: 1px solid {c['BORDER']}; font-size: 11px; padding: 0 8px;
+        border-top: 1px solid {c['BORDER']}; font-size: 13px; padding: 0 8px;
     }}
     QMenu {{
         background: {c['BG_PANEL']}; color: {c['TEXT_PRIMARY']};
@@ -263,7 +263,7 @@ def build_qss() -> str:
     QDialogButtonBox QPushButton {{ min-width: 80px; }}
     QGroupBox {{
         color: {c['TEXT_DIM']}; border: 1px solid {c['BORDER']}; border-radius: 8px;
-        margin-top: 12px; padding-top: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;
+        margin-top: 12px; padding-top: 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.8px;
     }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 6px; color: {c['TEXT_MUTED']}; }}
     QLabel#breadcrumb {{ color: {c['TEXT_DIM']}; font-size: 12px; padding: 0 4px; }}
@@ -274,17 +274,17 @@ def build_qss() -> str:
     QLabel#badge_running {{
         background: rgba(74,222,128,0.15); color: {c['SUCCESS']};
         border: 1px solid rgba(74,222,128,0.4); border-radius: 10px;
-        padding: 2px 10px; font-size: 11px; font-weight: 600;
+        padding: 2px 10px; font-size: 13px; font-weight: 600;
     }}
     QLabel#badge_pending {{
         background: rgba(251,191,36,0.15); color: {c['WARNING']};
         border: 1px solid rgba(251,191,36,0.4); border-radius: 10px;
-        padding: 2px 10px; font-size: 11px; font-weight: 600;
+        padding: 2px 10px; font-size: 13px; font-weight: 600;
     }}
     QLabel#badge_failed {{
         background: rgba(248,113,113,0.15); color: {c['DANGER']};
         border: 1px solid rgba(248,113,113,0.4); border-radius: 10px;
-        padding: 2px 10px; font-size: 11px; font-weight: 600;
+        padding: 2px 10px; font-size: 13px; font-weight: 600;
     }}
     QListWidget#recent_list {{
         background: {c['BG_DARK']}; border: 1px solid {c['BORDER']}; border-radius: 8px; outline: none;
