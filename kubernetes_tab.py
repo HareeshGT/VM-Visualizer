@@ -1131,8 +1131,8 @@ class KubernetesTab(QWidget):
             f"{glyph}  "
             f"{svc['name']:<{max_name}}"
             f"{'ns/' + svc['namespace']:<{max_ns}}"
-            f": {svc['port']}"
-            f" → {svc['container_port']}"
+            f" : {svc['container_port']}"
+            f" → {svc['port']}"
         )
 
     def _load_tunnel_csv(self):
