@@ -10,7 +10,7 @@ APP_DIR     = os.path.join(os.path.expanduser("~"), ".vm_visualizer")
 RECENT_FILE = os.path.join(APP_DIR, "recent.csv")
 os.makedirs(APP_DIR, exist_ok=True)
 
-RECENT_MAX    = 10
+RECENT_MAX    = 50
 RECENT_FIELDS = ["host", "port", "user", "pem", "alias"]   # alias is 5th column
 
 
