@@ -53,6 +53,18 @@ class SudoFS:
         """Single-quote a path safely for shell injection."""
         return "'" + path.replace("'", "'\\''") + "'"
 
+    def _run_or_raise(self, cmd):
+        # type: (str) -> None
+        """Run *cmd* and raise PermissionError if it wrote to stderr.
+
+        Shared by mkdir/rmdir/remove/rename/put, which previously each
+        repeated their own copy of this same "run, then check err.strip()"
+        check.
+        """
+        _, err = self._run(cmd)
+        if err.strip():
+            raise PermissionError(err.strip())
+
     # ── Path resolution ───────────────────────────────────────
     def normalize(self, path):
         # type: (str) -> str
@@ -158,51 +170,41 @@ class SudoFS:
             return self._sftp.put(local_path, remote_path)
         tmp = "/tmp/.ec2mgr_upload_{}".format(os.getpid())
         self._sftp.put(local_path, tmp)
-        _, err = self._run(
+        self._run_or_raise(
             "sudo mv {tmp} {dst} && sudo chown {user} {dst}".format(
                 tmp=self._sq(tmp), dst=self._sq(remote_path), user=self.sudo_user)
         )
-        if err.strip():
-            raise PermissionError(err.strip())
 
     # ── Directory operations ──────────────────────────────────
     def mkdir(self, path):
         # type: (str) -> None
         if not self.sudo_user:
             return self._sftp.mkdir(path)
-        _, err = self._run("{prefix}mkdir {p} 2>&1".format(
+        self._run_or_raise("{prefix}mkdir {p} 2>&1".format(
             prefix=self._sudo_prefix, p=self._sq(path)))
-        if err.strip():
-            raise PermissionError(err.strip())
 
     def rmdir(self, path):
         # type: (str) -> None
         if not self.sudo_user:
             return self._sftp.rmdir(path)
-        _, err = self._run("{prefix}rmdir {p} 2>&1".format(
+        self._run_or_raise("{prefix}rmdir {p} 2>&1".format(
             prefix=self._sudo_prefix, p=self._sq(path)))
-        if err.strip():
-            raise PermissionError(err.strip())
 
     # ── File removal ──────────────────────────────────────────
     def remove(self, path):
         # type: (str) -> None
         if not self.sudo_user:
             return self._sftp.remove(path)
-        _, err = self._run("{prefix}rm {p} 2>&1".format(
+        self._run_or_raise("{prefix}rm {p} 2>&1".format(
             prefix=self._sudo_prefix, p=self._sq(path)))
-        if err.strip():
-            raise PermissionError(err.strip())
 
     # ── Rename / move ─────────────────────────────────────────
     def rename(self, old_path, new_path):
         # type: (str, str) -> None
         if not self.sudo_user:
             return self._sftp.rename(old_path, new_path)
-        _, err = self._run("{prefix}mv -n {old} {new} 2>&1".format(
+        self._run_or_raise("{prefix}mv -n {old} {new} 2>&1".format(
             prefix=self._sudo_prefix, old=self._sq(old_path), new=self._sq(new_path)))
-        if err.strip():
-            raise PermissionError(err.strip())
 
     # ── Teardown ──────────────────────────────────────────────
     def close(self):

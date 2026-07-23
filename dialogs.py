@@ -1,6 +1,7 @@
 """dialogs.py — All modal dialogs: Connect, FileTransfer, LogViewer, Exec,
                 FileEditor, FileExec, SearchDialog."""
 
+import codecs
 import io
 import os
 import re
@@ -14,21 +15,33 @@ from PyQt5.QtWidgets import (
     QLineEdit, QFrame, QTextEdit, QFileDialog, QSpinBox, QCheckBox,
     QApplication, QComboBox, QMessageBox, QSplitter, QWidget,
     QPlainTextEdit, QTextBrowser, QAbstractItemView, QTreeWidget,
-    QTreeWidgetItem, QHeaderView, QShortcut,
+    QTreeWidgetItem, QHeaderView, QShortcut, QSlider,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QUrl
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QTextCharFormat, QKeySequence
 
 from themes import T, apply_qss_to
 from utils import load_recent_instances, size_fmt, append_terminal_html, append_terminal_text, html_escape, monospace_font
-from workers import CommandWorker, _TransferWorker
+from workers import CommandWorker, _TransferWorker, ScpTransferWorker, track_worker, FileStreamReadWorker, MediaStreamServer, _StreamServerStartWorker
+
+# QtMultimedia is an optional Qt component — most PyQt5 installs on macOS
+# and Linux ship it, but guard the import so a system missing the
+# multimedia plugin doesn't break the whole app, just the media player.
+try:
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    from PyQt5.QtMultimediaWidgets import QVideoWidget
+    _MULTIMEDIA_AVAILABLE = True
+except Exception:
+    _MULTIMEDIA_AVAILABLE = False
 
 
 # ─── OS-style file-transfer dialog ───────────────────────────
 class FileTransferDialog(QDialog):
     """OS-style file-transfer sheet with animated progress, speed and ETA."""
 
-    def __init__(self, parent, sftp, direction: str, local_path: str, remote_path: str):
+    def __init__(self, parent, sftp, direction: str, local_path: str, remote_path: str,
+                 host: str = None, port: int = 22, user: str = None, pem: str = None,
+                 sudo_user: str = None):
         super().__init__(parent)
         self._direction  = direction
         self._local      = local_path
@@ -118,7 +131,30 @@ class FileTransferDialog(QDialog):
         self._timer.timeout.connect(self._update_speed)
 
         self._t0 = time.monotonic()
-        self._worker = _TransferWorker(sftp, direction, local_path, remote_path)
+
+        # Use real `scp` on the app's host machine when we can: a plain
+        # (non-sudo) key-authenticated connection. A sudo-target transfer
+        # still needs the SudoFS two-hop dance (upload to a tmp path, then
+        # `sudo mv` over ssh), and password-only auth has no clean
+        # non-interactive way to hand scp a password — both of those keep
+        # using the SFTP path instead.
+        use_scp = bool(pem) and bool(host) and bool(user) and not sudo_user
+        total_size = None
+        if use_scp:
+            try:
+                if direction == "upload":
+                    total_size = os.path.getsize(local_path)
+                else:
+                    total_size = sftp.stat(remote_path).st_size
+            except Exception:
+                total_size = None
+
+        if use_scp:
+            self._worker = ScpTransferWorker(
+                host, port, user, pem, direction, local_path, remote_path, total_size
+            )
+        else:
+            self._worker = _TransferWorker(sftp, direction, local_path, remote_path)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_success)
         self._worker.finished_err.connect(self._on_error)
@@ -203,13 +239,19 @@ class FileTransferDialog(QDialog):
         return f"{h}h {m:02d}m"
 
     @classmethod
-    def download(cls, parent, sftp, remote_path: str, local_path: str) -> bool:
-        dlg = cls(parent, sftp, "download", local_path, remote_path)
+    def download(cls, parent, sftp, remote_path: str, local_path: str,
+                 host: str = None, port: int = 22, user: str = None, pem: str = None,
+                 sudo_user: str = None) -> bool:
+        dlg = cls(parent, sftp, "download", local_path, remote_path,
+                  host=host, port=port, user=user, pem=pem, sudo_user=sudo_user)
         return dlg.exec_() == QDialog.Accepted
 
     @classmethod
-    def upload(cls, parent, sftp, local_path: str, remote_path: str) -> bool:
-        dlg = cls(parent, sftp, "upload", local_path, remote_path)
+    def upload(cls, parent, sftp, local_path: str, remote_path: str,
+               host: str = None, port: int = 22, user: str = None, pem: str = None,
+               sudo_user: str = None) -> bool:
+        dlg = cls(parent, sftp, "upload", local_path, remote_path,
+                  host=host, port=port, user=user, pem=pem, sudo_user=sudo_user)
         return dlg.exec_() == QDialog.Accepted
 
 
@@ -525,8 +567,7 @@ class LogViewerDialog(QDialog):
             worker = CommandWorker(self.ssh, cmd)
             worker.done.connect(self.log_view.setPlainText)
             worker.error.connect(lambda e: self.log_view.setPlainText(f"[error] {e}"))
-            worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
-            self._workers.append(worker)
+            track_worker(self._workers, worker)
             worker.start()
             return
 
@@ -539,7 +580,7 @@ class LogViewerDialog(QDialog):
         worker.error.connect(self._on_stream_error)
         worker.finished.connect(self._on_stream_finished)
         self._stream_worker = worker
-        self._workers.append(worker)
+        track_worker(self._workers, worker)
         worker.start()
 
     def _on_stream_line(self, text: str):
@@ -557,8 +598,9 @@ class LogViewerDialog(QDialog):
         self._on_stream_line(f"\n[stream error] {err}\n")
 
     def _on_stream_finished(self, code: int):
-        if self._stream_worker in self._workers:
-            self._workers.remove(self._stream_worker)
+        # track_worker() already removes the worker from self._workers once
+        # its finished signal fires; only the dialog-local reference needs
+        # clearing here.
         self._stream_worker = None
         if "error" not in self.status_lbl.text():
             self.status_lbl.setText("○ stream ended")
@@ -616,10 +658,6 @@ class ExecDialog(QDialog):
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
 
-    def _cleanup_worker(self, worker):
-        if worker in self._workers:
-            self._workers.remove(worker)
-
     def _run(self):
         cmd = self.cmd_inp.text().strip()
         if not cmd:
@@ -642,8 +680,7 @@ class ExecDialog(QDialog):
             worker = CommandWorker(self.ssh, full)
             worker.done.connect(self._handle_cd_result)
             worker.error.connect(lambda e: append_terminal_html(self.output, f"<span style='color:{T['DANGER']}'>[error] {html_escape(e)}</span>"))
-            worker.finished.connect(lambda: self._cleanup_worker(worker))
-            self._workers.append(worker)
+            track_worker(self._workers, worker)
             worker.start()
             self.cmd_inp.clear()
             return
@@ -654,8 +691,7 @@ class ExecDialog(QDialog):
         worker = CommandWorker(self.ssh, full)
         worker.done.connect(lambda r: append_terminal_text(self.output, r))
         worker.error.connect(lambda e: append_terminal_html(self.output, f"<span style='color:{T['DANGER']}'>[error] {html_escape(e)}</span>"))
-        worker.finished.connect(lambda: self._cleanup_worker(worker))
-        self._workers.append(worker)
+        track_worker(self._workers, worker)
         worker.start()
         self.cmd_inp.clear()
 
@@ -673,14 +709,22 @@ class ExecDialog(QDialog):
 class FileEditorDialog(QDialog):
     """Remote file editor with find/replace, line numbers, and save-back."""
 
-    def __init__(self, parent, sftp, ssh, remote_path: str, content: str, sudo_user=None):
+    def __init__(self, parent, sftp, ssh, remote_path: str, content=None, sudo_user=None):
         super().__init__(parent)
         self._sftp      = sftp
         self._ssh       = ssh
         self._remote    = remote_path
         self._sudo_user = sudo_user
-        self._original  = content
+        self._original  = content or ""
         self._highlights = []
+
+        # When content is None, the editor opens immediately and streams
+        # the file in live in the background (see _start_live_load) rather
+        # than blocking behind a separate "downloading" dialog first.
+        self._loading           = content is None
+        self._load_worker       = None
+        self._decoder           = None
+        self._chunks_since_sync = 0
 
         fname = os.path.basename(remote_path)
         self.setWindowTitle(f"Edit — {fname}")
@@ -712,36 +756,56 @@ class FileEditorDialog(QDialog):
         self._modified_dot.hide()
         tb.addWidget(self._modified_dot)
 
+        # All five toolbar buttons share one fixed size so they read as a
+        # consistent row instead of each auto-sizing to its own label.
+        TB_BTN_SIZE = (112, 30)
+
         self._wrap_btn = QPushButton("⇌ Wrap")
         self._wrap_btn.setCheckable(True)
         self._wrap_btn.setChecked(True)
-        self._wrap_btn.setFixedWidth(74)
+        self._wrap_btn.setFixedSize(*TB_BTN_SIZE)
         self._wrap_btn.toggled.connect(self._toggle_wrap)
         tb.addWidget(self._wrap_btn)
 
         self._find_btn = QPushButton("🔍 Find")
         self._find_btn.setCheckable(True)
-        self._find_btn.setFixedWidth(74)
+        self._find_btn.setFixedSize(*TB_BTN_SIZE)
         self._find_btn.toggled.connect(self._toggle_find_bar)
         tb.addWidget(self._find_btn)
 
         save_btn = QPushButton("💾  Save")
         save_btn.setObjectName("primary")
-        save_btn.setFixedWidth(90)
+        save_btn.setFixedSize(*TB_BTN_SIZE)
         save_btn.clicked.connect(self._save)
         tb.addWidget(save_btn)
+        self._save_btn = save_btn
 
         save_close_btn = QPushButton("Save & Close")
-        save_close_btn.setFixedWidth(110)
+        save_close_btn.setFixedSize(*TB_BTN_SIZE)
         save_close_btn.clicked.connect(self._save_and_close)
         tb.addWidget(save_close_btn)
+        self._save_close_btn = save_close_btn
 
         discard_btn = QPushButton("Discard")
         discard_btn.setObjectName("danger")
-        discard_btn.setFixedWidth(76)
+        discard_btn.setFixedSize(*TB_BTN_SIZE)
         discard_btn.clicked.connect(self._confirm_close)
         tb.addWidget(discard_btn)
         lay.addWidget(tb_widget)
+
+        # Thin indeterminate/progress strip shown only while a file is
+        # streaming in live (see _start_live_load) — hidden the rest of
+        # the time.
+        self._load_bar = QProgressBar()
+        self._load_bar.setFixedHeight(3)
+        self._load_bar.setTextVisible(False)
+        self._load_bar.setStyleSheet(
+            "QProgressBar {{ border: none; background: {bg}; }}"
+            "QProgressBar::chunk {{ background: {ac}; }}".format(
+                bg=T['BG_ITEM'], ac=T['ACCENT'])
+        )
+        self._load_bar.hide()
+        lay.addWidget(self._load_bar)
 
         # ── Find/Replace bar ──────────────────────────────────
         self._find_bar = QWidget()
@@ -814,7 +878,7 @@ class FileEditorDialog(QDialog):
             f"background: {T['BG_DARK']}; color: {T['TEXT_PRIMARY']}; "
             f"border: none; padding: 12px;"
         )
-        self.editor.setPlainText(content)
+        self.editor.setPlainText(content or "")
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.verticalScrollBar().valueChanged.connect(self._sync_line_scroll)
         ea_lay.addWidget(self.editor, 1)
@@ -857,6 +921,9 @@ class FileEditorDialog(QDialog):
             lambda: self._find_btn.setChecked(False)
         )
 
+        if self._loading:
+            self._start_live_load()
+
     # ── Line numbers ──────────────────────────────────────────
     def _update_line_numbers(self):
         n = self.editor.document().blockCount()
@@ -892,6 +959,106 @@ class FileEditorDialog(QDialog):
         self._status_lbl.setStyleSheet(
             f"color: {color or T['TEXT_MUTED']}; font-size: 13px;"
         )
+
+    # ── Live streaming load ─────────────────────────────────────
+    # The editor opens immediately (empty) and content is appended as it
+    # streams in from FileStreamReadWorker, instead of blocking behind a
+    # separate "downloading" dialog first — you can start reading/
+    # scrolling the file as soon as the first chunks land. Save stays
+    # disabled until the whole file has arrived, so there's no risk of
+    # saving back a partially-loaded file.
+    def _start_live_load(self):
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._chunks_since_sync = 0
+        self._save_btn.setEnabled(False)
+        self._save_close_btn.setEnabled(False)
+        self._load_bar.show()
+        self._load_bar.setRange(0, 0)
+        self._set_status("Loading…", T['WARNING'])
+
+        # Line-number/modified-dot recompute is O(n) — doing it on every
+        # single 64KB chunk of a big file would add up fast, so it's
+        # handled by our own throttled calls during the load instead of
+        # the normal per-keystroke textChanged handler.
+        try:
+            self.editor.textChanged.disconnect(self._on_text_changed)
+        except Exception:
+            pass
+
+        self._load_worker = FileStreamReadWorker(
+            self._sftp, self._ssh, self._remote,
+            sudo_user=self._sudo_user, max_bytes=self.MAX_EDIT_BYTES,
+        )
+        self._load_worker.chunk_ready.connect(self._on_load_chunk)
+        self._load_worker.progress.connect(self._on_load_progress)
+        self._load_worker.finished_ok.connect(self._on_load_finished)
+        self._load_worker.finished_err.connect(self._on_load_error)
+        self._load_worker.start()
+
+    def _on_load_chunk(self, chunk: bytes):
+        try:
+            text = self._decoder.decode(chunk)
+        except RuntimeError:
+            return  # dialog is mid-teardown; drop the chunk
+        if not text:
+            return
+        cur = self.editor.textCursor()
+        cur.movePosition(QTextCursor.End)
+        cur.insertText(text)
+        self._chunks_since_sync += 1
+        if self._chunks_since_sync >= 4:   # ~every 256KB, not every chunk
+            self._chunks_since_sync = 0
+            self._update_line_numbers()
+
+    def _on_load_progress(self, done, total):
+        try:
+            if total > 0:
+                self._load_bar.setRange(0, 1000)
+                self._load_bar.setValue(int(done / total * 1000))
+                self._set_status(
+                    "Loading… {} / {}".format(size_fmt(done), size_fmt(total)), T['WARNING'])
+            else:
+                self._load_bar.setRange(0, 0)
+                self._set_status("Loading… {}".format(size_fmt(done)), T['WARNING'])
+        except RuntimeError:
+            pass
+
+    def _on_load_finished(self, data: bytes):
+        try:
+            tail = self._decoder.decode(b"", final=True)
+            if tail:
+                cur = self.editor.textCursor()
+                cur.movePosition(QTextCursor.End)
+                cur.insertText(tail)
+            if len(data) >= self.MAX_EDIT_BYTES:
+                cur = self.editor.textCursor()
+                cur.movePosition(QTextCursor.End)
+                cur.insertText(
+                    "\n\n[... file truncated at {} -- too large to fully load "
+                    "into the editor. Download it instead to view the whole "
+                    "thing.]".format(size_fmt(self.MAX_EDIT_BYTES))
+                )
+            self._loading = False
+            self._load_bar.hide()
+            self._save_btn.setEnabled(True)
+            self._save_close_btn.setEnabled(True)
+            self._original = self.editor.toPlainText()
+            self._modified_dot.hide()
+            self._update_line_numbers()
+            self._set_status("Ready")
+            self.editor.textChanged.connect(self._on_text_changed)
+        except RuntimeError:
+            pass
+
+    def _on_load_error(self, msg):
+        try:
+            self._loading = False
+            self._load_bar.hide()
+            self._set_status("Failed to load: {}".format(msg), T['DANGER'])
+            self.editor.textChanged.connect(self._on_text_changed)
+        except RuntimeError:
+            pass
+        QMessageBox.critical(self, "Cannot Open File", msg)
 
     # ── Find / Replace ────────────────────────────────────────
     def _search_flags(self):
@@ -984,6 +1151,9 @@ class FileEditorDialog(QDialog):
 
     # ── Save ──────────────────────────────────────────────────
     def _save(self) -> bool:
+        if self._loading:
+            self._set_status("Still loading — please wait", T['WARNING'])
+            return False
         content = self.editor.toPlainText()
         self._set_status("Saving…", T['WARNING'])
         try:
@@ -1014,7 +1184,28 @@ class FileEditorDialog(QDialog):
         if self._save():
             self.accept()
 
+    def _cancel_live_load(self):
+        """Stops a still-running load worker and disconnects its signals
+        so a late chunk/finished/error can't touch a dialog that's mid-
+        close (same pattern used for the media player's teardown)."""
+        if self._load_worker:
+            for sig, slot in (
+                (self._load_worker.chunk_ready,  self._on_load_chunk),
+                (self._load_worker.progress,     self._on_load_progress),
+                (self._load_worker.finished_ok,  self._on_load_finished),
+                (self._load_worker.finished_err, self._on_load_error),
+            ):
+                try:
+                    sig.disconnect(slot)
+                except Exception:
+                    pass
+            self._load_worker.cancel()
+
     def _confirm_close(self):
+        if self._loading:
+            self._cancel_live_load()
+            self.reject()
+            return
         if self.editor.toPlainText() != self._original:
             r = QMessageBox.question(
                 self, "Discard Changes",
@@ -1026,6 +1217,10 @@ class FileEditorDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event):
+        if self._loading:
+            self._cancel_live_load()
+            event.accept()
+            return
         if self.editor.toPlainText() != self._original:
             r = QMessageBox.question(
                 self, "Unsaved Changes", "Discard changes and close?",
@@ -1036,15 +1231,365 @@ class FileEditorDialog(QDialog):
                 return
         event.accept()
 
+    MAX_EDIT_BYTES = 8 * 1024 * 1024
+
     @classmethod
     def open_remote(cls, parent, sftp, ssh, remote_path: str, sudo_user=None):
+        """Opens *remote_path* for editing immediately — the editor window
+        appears right away and the file's content streams in live from a
+        background FileStreamReadWorker (see _start_live_load), instead of
+        blocking behind a separate "downloading" dialog first. You can
+        start reading/scrolling as soon as the first chunks land; Save
+        stays disabled until the whole file has arrived.
+        """
+        dlg = cls(parent, sftp, ssh, remote_path, content=None, sudo_user=sudo_user)
+        dlg.exec_()
+        return dlg
+
+
+# ─── Media player dialog ───────────────────────────────────────
+class MediaPlayerDialog(QDialog):
+    """Plays a remote video/audio file (mp4, mov, mp3, wav, ...) with
+    standard media-player transport controls (play/pause, stop, skip
+    +/-10s, seek bar, volume/mute).
+
+    Nothing is downloaded to local disk. A tiny loopback-only HTTP server
+    (MediaStreamServer, in workers.py) is started on a background thread;
+    it translates each HTTP request QMediaPlayer makes into SFTP reads (or
+    a streamed "sudo cat" if a sudo user is active and plain SFTP can't
+    reach the file) on demand, straight from the SSH connection. Playback
+    starts as soon as the server is up — QMediaPlayer pulls bytes as it
+    plays, the same way it would stream from any web server.
+    """
+
+    def __init__(self, parent, sftp, ssh, remote_path: str, kind: str, sudo_user=None):
+        super().__init__(parent)
+        self._sftp        = sftp
+        self._ssh         = ssh
+        self._remote      = remote_path
+        self._kind        = kind          # "video" or "audio"
+        self._sudo_user   = sudo_user
+        self._stream_server = None
+        self._start_worker  = None
+        self._seeking      = False
+
+        fname = os.path.basename(remote_path)
+        self.setWindowTitle("Play - {}".format(fname))
+        self.resize(720, 480 if kind == "video" else 220)
+        apply_qss_to(self)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # ── Header ──────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(40)
+        header.setStyleSheet(
+            "background: {bg}; border-bottom: 1px solid {bd};".format(
+                bg=T['BG_PANEL'], bd=T['BORDER'])
+        )
+        h = QHBoxLayout(header)
+        h.setContentsMargins(12, 0, 12, 0)
+        name_lbl = QLabel(fname)
+        name_lbl.setStyleSheet(
+            "color: {}; font-size: 13px; font-weight: 600;".format(T['TEXT_PRIMARY']))
+        h.addWidget(name_lbl)
+        h.addStretch()
+        lay.addWidget(header)
+
+        # ── Body: video surface, or an icon placeholder for audio ──
+        body = QWidget()
+        body.setStyleSheet("background: #000000;" if kind == "video"
+                            else "background: {};".format(T['BG_DARK']))
+        b_lay = QVBoxLayout(body)
+        b_lay.setContentsMargins(0, 0, 0, 0)
+
+        self._video_widget = None
+        if _MULTIMEDIA_AVAILABLE and kind == "video":
+            self._video_widget = QVideoWidget()
+            b_lay.addWidget(self._video_widget, 1)
+        else:
+            icon_lbl = QLabel("🎵" if kind == "audio" else "⚠")
+            icon_lbl.setAlignment(Qt.AlignCenter)
+            icon_lbl.setFont(QFont("Segoe UI Emoji", 64))
+            b_lay.addWidget(icon_lbl, 1)
+        lay.addWidget(body, 1)
+
+        # ── Status / buffering progress ─────────────────────
+        self._status_lbl = QLabel("Preparing...")
+        self._status_lbl.setStyleSheet(
+            "color: {}; font-size: 12px; padding: 6px 12px;".format(T['TEXT_DIM']))
+        lay.addWidget(self._status_lbl)
+
+        self._dl_bar = QProgressBar()
+        self._dl_bar.setRange(0, 0)
+        self._dl_bar.setFixedHeight(4)
+        self._dl_bar.setTextVisible(False)
+        lay.addWidget(self._dl_bar)
+
+        # ── Transport controls ──────────────────────────────
+        controls = QWidget()
+        controls.setFixedHeight(72)
+        controls.setStyleSheet(
+            "background: {bg}; border-top: 1px solid {bd};".format(
+                bg=T['BG_PANEL'], bd=T['BORDER'])
+        )
+        c = QVBoxLayout(controls)
+        c.setContentsMargins(12, 6, 12, 6)
+        c.setSpacing(4)
+
+        seek_row = QHBoxLayout()
+        self._pos_lbl = QLabel("0:00")
+        self._pos_lbl.setFixedWidth(46)
+        self._pos_lbl.setStyleSheet("color: {}; font-size: 11px;".format(T['TEXT_DIM']))
+        seek_row.addWidget(self._pos_lbl)
+
+        self._seek_slider = QSlider(Qt.Horizontal)
+        self._seek_slider.setRange(0, 0)
+        self._seek_slider.sliderPressed.connect(self._on_seek_start)
+        self._seek_slider.sliderReleased.connect(self._on_seek_end)
+        seek_row.addWidget(self._seek_slider, 1)
+
+        self._dur_lbl = QLabel("0:00")
+        self._dur_lbl.setFixedWidth(46)
+        self._dur_lbl.setAlignment(Qt.AlignRight)
+        self._dur_lbl.setStyleSheet("color: {}; font-size: 11px;".format(T['TEXT_DIM']))
+        seek_row.addWidget(self._dur_lbl)
+        c.addLayout(seek_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        def _mkbtn(text, tooltip, width=36):
+            b = QPushButton(text)
+            b.setFixedSize(width, 32)
+            b.setToolTip(tooltip)
+            return b
+
+        self._back_btn = _mkbtn("⏮", "Back 10s")
+        self._back_btn.clicked.connect(lambda: self._skip(-10000))
+        btn_row.addWidget(self._back_btn)
+
+        self._play_btn = _mkbtn("▶", "Play / Pause", 46)
+        self._play_btn.setObjectName("primary")
+        self._play_btn.clicked.connect(self._toggle_play)
+        btn_row.addWidget(self._play_btn)
+
+        self._fwd_btn = _mkbtn("⏭", "Forward 10s")
+        self._fwd_btn.clicked.connect(lambda: self._skip(10000))
+        btn_row.addWidget(self._fwd_btn)
+
+        self._stop_btn = _mkbtn("⏹", "Stop")
+        self._stop_btn.clicked.connect(self._stop)
+        btn_row.addWidget(self._stop_btn)
+
+        btn_row.addSpacing(14)
+
+        self._mute_btn = _mkbtn("🔊", "Mute")
+        self._mute_btn.clicked.connect(self._toggle_mute)
+        btn_row.addWidget(self._mute_btn)
+
+        self._vol_slider = QSlider(Qt.Horizontal)
+        self._vol_slider.setFixedWidth(90)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.setValue(80)
+        btn_row.addWidget(self._vol_slider)
+
+        btn_row.addStretch()
+        c.addLayout(btn_row)
+        lay.addWidget(controls)
+
+        self._player = None
+        if _MULTIMEDIA_AVAILABLE:
+            self._player = QMediaPlayer(self)
+            if self._video_widget is not None:
+                self._player.setVideoOutput(self._video_widget)
+            self._player.setVolume(80)
+            self._player.positionChanged.connect(self._on_position_changed)
+            self._player.durationChanged.connect(self._on_duration_changed)
+            self._player.stateChanged.connect(self._on_state_changed)
+            self._player.bufferStatusChanged.connect(self._on_buffer_status)
+            self._player.error.connect(self._on_player_error)
+            self._vol_slider.valueChanged.connect(self._player.setVolume)
+        else:
+            self._status_lbl.setText(
+                "Media playback isn't available - this Qt install is missing "
+                "QtMultimedia. You can still download the file instead."
+            )
+            self._status_lbl.setStyleSheet(
+                "color: {}; font-size: 12px; padding: 6px 12px;".format(T['WARNING']))
+            self._dl_bar.hide()
+
+        self._set_controls_enabled(False)
+
+        if _MULTIMEDIA_AVAILABLE:
+            self._start_stream()
+
+    # ── background stream startup ─────────────────────────────
+    def _start_stream(self):
+        self._status_lbl.setText("Connecting...")
+        self._stream_server = MediaStreamServer(
+            self._ssh, self._sftp, self._remote, sudo_user=self._sudo_user
+        )
+        self._start_worker = _StreamServerStartWorker(self._stream_server)
+        self._start_worker.ready.connect(self._on_stream_ready)
+        self._start_worker.error.connect(self._on_stream_error)
+        self._start_worker.start()
+
+    def _on_stream_ready(self, url):
+        # Defensive: if this arrives in the brief window between the
+        # worker finishing and closeEvent's disconnect calls running, the
+        # dialog's C++ widgets may already be gone — don't touch them.
         try:
-            with sftp.open(remote_path, "r") as f:
-                content = f.read(2 * 1024 * 1024).decode(errors="replace")
-        except Exception as e:
-            QMessageBox.critical(parent, "Cannot Open File", str(e))
-            return None
-        dlg = cls(parent, sftp, ssh, remote_path, content, sudo_user=sudo_user)
+            if self._stream_server.supports_range:
+                self._status_lbl.setText("Streaming")
+            else:
+                self._status_lbl.setText("Streaming (seek limited under sudo)")
+            self._set_controls_enabled(True)
+            self._player.setMedia(QMediaContent(QUrl(url)))
+            self._player.play()
+        except RuntimeError:
+            pass
+
+    def _on_stream_error(self, msg):
+        try:
+            self._dl_bar.hide()
+            self._status_lbl.setText("Streaming failed: {}".format(msg))
+            self._status_lbl.setStyleSheet(
+                "color: {}; font-size: 12px; padding: 6px 12px;".format(T['DANGER']))
+        except RuntimeError:
+            pass
+
+    def _on_buffer_status(self, percent):
+        try:
+            if percent < 100:
+                self._dl_bar.show()
+                self._dl_bar.setRange(0, 100)
+                self._dl_bar.setValue(percent)
+                self._status_lbl.setText("Buffering... {}%".format(percent))
+            else:
+                self._dl_bar.hide()
+                if self._stream_server and self._stream_server.supports_range:
+                    self._status_lbl.setText("Streaming")
+        except RuntimeError:
+            pass
+
+    # ── transport controls ──────────────────────────────────
+    def _set_controls_enabled(self, enabled: bool):
+        for w in (self._back_btn, self._play_btn, self._fwd_btn,
+                  self._stop_btn, self._mute_btn, self._vol_slider, self._seek_slider):
+            w.setEnabled(enabled)
+
+    def _toggle_play(self):
+        if not self._player:
+            return
+        if self._player.state() == QMediaPlayer.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def _stop(self):
+        if self._player:
+            self._player.stop()
+
+    def _skip(self, delta_ms: int):
+        if not self._player:
+            return
+        new_pos = max(0, min(self._player.duration(), self._player.position() + delta_ms))
+        self._player.setPosition(new_pos)
+
+    def _toggle_mute(self):
+        if not self._player:
+            return
+        muted = not self._player.isMuted()
+        self._player.setMuted(muted)
+        self._mute_btn.setText("🔇" if muted else "🔊")
+
+    def _on_seek_start(self):
+        self._seeking = True
+
+    def _on_seek_end(self):
+        if self._player:
+            self._player.setPosition(self._seek_slider.value())
+        self._seeking = False
+
+    def _on_position_changed(self, pos):
+        if not self._seeking:
+            self._seek_slider.setValue(pos)
+        self._pos_lbl.setText(self._fmt_time(pos))
+
+    def _on_duration_changed(self, dur):
+        self._seek_slider.setRange(0, dur)
+        self._dur_lbl.setText(self._fmt_time(dur))
+
+    def _on_state_changed(self, state):
+        self._play_btn.setText("⏸" if state == QMediaPlayer.PlayingState else "▶")
+
+    def _on_player_error(self, _err):
+        if not self._player:
+            return
+        msg = self._player.errorString()
+        if msg:
+            self._status_lbl.setText("Playback error: {}".format(msg))
+            self._status_lbl.setStyleSheet(
+                "color: {}; font-size: 12px; padding: 6px 12px;".format(T['DANGER']))
+            self._status_lbl.show()
+
+    @staticmethod
+    def _fmt_time(ms: int) -> str:
+        s = ms // 1000
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        return "{}:{:02d}:{:02d}".format(h, m, s) if h else "{}:{:02d}".format(m, s)
+
+    # ── cleanup ──────────────────────────────────────────────
+    def closeEvent(self, event):
+        # Disconnect the player's own signals first so nothing it fires
+        # while winding down (position/duration/buffer/error updates)
+        # can land on a dialog that's mid-close.
+        if self._player:
+            for sig, slot in (
+                (self._player.positionChanged,     self._on_position_changed),
+                (self._player.durationChanged,     self._on_duration_changed),
+                (self._player.stateChanged,        self._on_state_changed),
+                (self._player.bufferStatusChanged, self._on_buffer_status),
+                (self._player.error,               self._on_player_error),
+            ):
+                try:
+                    sig.disconnect(slot)
+                except Exception:
+                    pass
+            self._player.stop()
+            # Releases the network source cleanly instead of leaving the
+            # backend holding a socket into a proxy we're about to kill.
+            self._player.setMedia(QMediaContent())
+
+        # QThread.terminate() forcibly kills the thread at an arbitrary
+        # point — if it's in the middle of a paramiko/SSL call (opening
+        # the SFTP channel, exec'ing "cat") that can crash the whole
+        # process, not just this dialog. Instead: stop listening for its
+        # result so a late ready/error can't touch a closing dialog, then
+        # let it finish naturally (it cleans itself up via
+        # finished -> deleteLater). Waiting briefly here avoids racing
+        # MediaStreamServer.stop() against the worker's own start().
+        if self._start_worker:
+            try:
+                self._start_worker.ready.disconnect(self._on_stream_ready)
+                self._start_worker.error.disconnect(self._on_stream_error)
+            except Exception:
+                pass
+            if self._start_worker.isRunning():
+                self._start_worker.wait(1500)
+
+        if self._stream_server:
+            self._stream_server.stop()
+
+        event.accept()
+
+    @classmethod
+    def open_remote(cls, parent, sftp, ssh, remote_path: str, kind: str, sudo_user=None):
+        dlg = cls(parent, sftp, ssh, remote_path, kind, sudo_user=sudo_user)
         dlg.exec_()
         return dlg
 

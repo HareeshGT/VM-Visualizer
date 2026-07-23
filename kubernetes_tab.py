@@ -17,7 +17,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess
 from PyQt5.QtGui import QColor, QFont, QFontDatabase
 
 from themes import T, apply_qss_to
-from workers import CommandWorker
+from workers import CommandWorker, track_worker
 from dialogs import LogViewerDialog, ExecDialog
 from utils import (
     append_terminal_html, append_terminal_text,
@@ -528,8 +528,6 @@ class KubernetesTab(QWidget):
             height: 22px;
         }
         """)
-        self.tunnel_list.setAlternatingRowColors(True)
-        self.tunnel_list.itemChanged.connect(self._update_tunnel_cmd_preview)
         lay.addWidget(self.tunnel_list, 1)
 
         # Command preview (read-only, for transparency/debugging)
@@ -561,6 +559,10 @@ class KubernetesTab(QWidget):
         self.tunnel_stop_btn.setEnabled(False)
         self.tunnel_stop_btn.clicked.connect(self._stop_tunnel)
         ctrl_row.addWidget(self.tunnel_stop_btn)
+
+        self.port_kill = self._toolbar_btn("✖ Kill Port", object_name="danger")
+        self.port_kill.clicked.connect(self._kill_selected_ports)
+        ctrl_row.addWidget(self.port_kill)
 
         self.tunnel_restart_btn = self._toolbar_btn(
             "↻  Restart Tunneling",
@@ -753,7 +755,7 @@ class KubernetesTab(QWidget):
         elif idx == 1: self._load_deployments()
         elif idx == 2: self._load_services(); self._load_ingress()
         elif idx == 3: self._load_config_resources()
-        elif idx == 5: self._refresh_tunnel_status()
+        elif idx == 4: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
     def _load_pods(self):
@@ -791,6 +793,10 @@ class KubernetesTab(QWidget):
                 item.setForeground(3, QColor(T['DANGER']))
             item.setFont(1, monospace_font(11))
             self.pod_tree.addTopLevelItem(item)
+        # Refreshing rebuilds every row from scratch, which would otherwise
+        # silently show everything again even though the filter box still
+        # has text in it — reapply whatever's currently typed there.
+        self._filter_pods(self.pod_filter.text())
 
     def _filter_pods(self, text: str):
         q = text.lower()
@@ -872,6 +878,9 @@ class KubernetesTab(QWidget):
             except Exception:
                 pass
             self.deploy_tree.addTopLevelItem(item)
+        # Same reasoning as _populate_pods: rebuild wipes the visual filter
+        # state even though the filter box still has text — reapply it.
+        self._filter_deployments(self.deploy_filter.text())
 
     def _on_deploy_click(self, item):
         try:
@@ -976,6 +985,9 @@ class KubernetesTab(QWidget):
             name = name.strip()
             if name:
                 self.cfg_list.addItem(QListWidgetItem(name))
+        # Same reasoning as _populate_pods: reapply whatever's in the
+        # filter box, since the rebuild above doesn't know about it.
+        self._filter_configs(self.cfg_filter.text())
 
     def _filter_configs(self, text: str):
         q = text.lower()
@@ -1107,7 +1119,7 @@ class KubernetesTab(QWidget):
             cmd = "kubectl " + cmd
         self.kubectl_inp.clear()
         self._run_cmd(cmd + " 2>&1",
-                      lambda o: (self._log(o), self.sub_tabs.setCurrentIndex(4)))
+                      lambda o: (self._log(o), self.sub_tabs.setCurrentIndex(5)))
 
     def _run_kubectl_terminal(self):
         cmd = self.k8s_inp.text().strip()
@@ -1312,6 +1324,40 @@ class KubernetesTab(QWidget):
             self.tunnel_status_lbl.setText("●  Not tunnelling")
             self.tunnel_status_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
 
+    def _on_ports_killed(self, out):
+        if out.strip():
+            append_terminal_text(self.tunnel_log, out)
+
+        self._refresh_tunnel_status()
+
+    def _kill_selected_ports(self):
+        if not self.ssh:
+            QMessageBox.warning(self, "Not connected", "Connect to an instance first.")
+            return
+        services = self._selected_tunnel_services()
+        if not services:
+            QMessageBox.warning(
+                self,
+                "No services selected",
+                "Select one or more services first."
+            )
+            return
+        ports = [str(svc["port"]) for svc in services]
+        # Kill anything listening on the selected ports
+        cmd = " ; ".join(
+            [
+                f"pid=$(lsof -ti:{port} 2>/dev/null); "
+                f'[ -n "$pid" ] && kill -9 $pid || echo "Nothing running on {port}"'
+                for port in ports
+            ]
+        )
+        cmd = f"bash -lc {shlex.quote(cmd)}"
+        append_terminal_html(
+            self.tunnel_log,
+            f"<span style='color:{T['ACCENT2']}'>$ {self._esc(cmd)}</span>"
+        )
+        self._run_cmd(cmd, self._on_ports_killed)
+
     def _on_tunnel_output(self, proc):
         data = bytes(proc.readAllStandardOutput()).decode(errors="replace")
         if data:
@@ -1345,7 +1391,9 @@ class KubernetesTab(QWidget):
             container_port = svc.get("container_port", port)
             ns = svc["namespace"]
 
-            cmds.append(f"kill {port}")
+            cmds.append(
+                f'pid=$(lsof -ti:{port} 2>/dev/null); [ -n "$pid" ] && kill -9 $pid'
+            )
             cmds.append(
                 f"nohup kubectl -n {ns} port-forward svc/{name} "
                 f"{port}:{container_port} > /dev/null 2>&1 &"
@@ -1393,8 +1441,7 @@ class KubernetesTab(QWidget):
         worker = CommandWorker(self.ssh, cmd)
         worker.done.connect(lambda out, svc=service: self._on_tunnel_step_done(svc, out))
         worker.error.connect(lambda err, svc=service: self._on_tunnel_step_error(svc, err))
-        worker.finished.connect(lambda w=worker: self._cleanup_worker(w))
-        self._workers.append(worker)
+        track_worker(self._workers, worker)
         worker.start()
 
     def _on_tunnel_step_done(self, service, output):
@@ -1441,10 +1488,6 @@ class KubernetesTab(QWidget):
         QTimer.singleShot(1200, self._refresh_tunnel_status)
 
     # ── Worker runner ─────────────────────────────────────────
-    def _cleanup_worker(self, worker):
-        if worker in self._workers:
-            self._workers.remove(worker)
-
     def _run_cmd(self, cmd: str, callback):
         if not self.ssh:
             return
@@ -1461,8 +1504,7 @@ class KubernetesTab(QWidget):
 
         worker.done.connect(on_done)
         worker.error.connect(on_error)
-        worker.finished.connect(lambda: self._cleanup_worker(worker))
-        self._workers.append(worker)
+        track_worker(self._workers, worker)
         worker.start()
 
     def _log(self, text: str):

@@ -22,8 +22,8 @@ import themes as _themes
 from themes import T, THEMES, apply_theme_vars, build_qss, apply_qss_to, save_settings
 from utils import classify, icon_for, size_fmt, add_recent_instance, monospace_font
 from sudo_fs import SudoFS
-from workers import CommandWorker, ConnectWorker
-from dialogs import ConnectDialog, FileTransferDialog, FileEditorDialog, FileExecDialog, SearchDialog, ConnectingDialog
+from workers import CommandWorker, ConnectWorker, track_worker
+from dialogs import ConnectDialog, FileTransferDialog, FileEditorDialog, FileExecDialog, SearchDialog, ConnectingDialog, MediaPlayerDialog
 from sidebar import Sidebar
 from preview import PreviewPane
 from file_widgets import FileRowWidget, FileGridWidget
@@ -38,6 +38,8 @@ _EXECUTABLE_EXTS = {
 }
 # Extensions that are editable as text
 _EDITABLE_KINDS = {"text", "code", "key"}
+# Kinds that open in the built-in media player instead of the text editor
+_MEDIA_KINDS = {"video", "audio"}
 
 
 class _TerminalPopoutWindow(QDialog):
@@ -76,6 +78,13 @@ class EC2FileManager(QMainWindow):
         self._items        = []
         self.host_label    = ""
         self._sudo_user    = None  # type: Optional[str]
+        # Local (client-side) connection details, kept around so file
+        # transfers can shell out to the system `scp` binary directly
+        # instead of going through paramiko's SFTP implementation.
+        self._conn_host    = None  # type: Optional[str]
+        self._conn_port    = 22
+        self._conn_user    = None  # type: Optional[str]
+        self._conn_pem     = None  # type: Optional[str]
         self._terminal_cwd = None  # type: Optional[str]
         self._pending_conn  = {}
         self._connecting_dlg = None
@@ -528,6 +537,8 @@ class EC2FileManager(QMainWindow):
         self.sftp = SudoFS(sftp, ssh)
         # Use alias as the display label when set, else user@host
         self.host_label = alias if alias else "{}@{}".format(user, host)
+        self._conn_host, self._conn_port = host, port
+        self._conn_user, self._conn_pem  = user, pem
         self._set_connected(True)
         self.k8s_tab.set_ssh(self.ssh)
         # Local (client-side) connection details for the port-tunnel
@@ -565,6 +576,8 @@ class EC2FileManager(QMainWindow):
             pass
         self.ssh = self.sftp = None
         self._sudo_user = None
+        self._conn_host = self._conn_user = self._conn_pem = None
+        self._conn_port = 22
         self.k8s_tab.set_ssh(None)
         self.k8s_tab.clear_connection_info()
         self.sidebar.clear_remote()
@@ -742,7 +755,9 @@ class EC2FileManager(QMainWindow):
         name = meta["name"]
         ext  = os.path.splitext(name)[1].lower()
 
-        if kind in _EDITABLE_KINDS:
+        if kind in _MEDIA_KINDS:
+            self._play_media(meta)
+        elif kind in _EDITABLE_KINDS:
             self._edit_file(meta)
         elif ext in _EXECUTABLE_EXTS:
             self._exec_file(meta)
@@ -750,7 +765,12 @@ class EC2FileManager(QMainWindow):
             save, _ = QFileDialog.getSaveFileName(self, "Save File", name)
             if save:
                 remote = self.current_path.rstrip("/") + "/" + name
-                FileTransferDialog.download(self, self.sftp, remote, save)
+                FileTransferDialog.download(
+                    self, self.sftp, remote, save,
+                    host=self._conn_host, port=self._conn_port,
+                    user=self._conn_user, pem=self._conn_pem,
+                    sudo_user=self._sudo_user,
+                )
                 self.status.showMessage("Downloaded {}".format(name))
 
     # ── Edit helpers ──────────────────────────────────────────
@@ -778,6 +798,15 @@ class EC2FileManager(QMainWindow):
             QMessageBox.information(self, "Edit", "Cannot edit a directory.")
             return
         self._edit_file(meta)
+
+    # ── Media playback helpers ─────────────────────────────────
+    def _play_media(self, meta):
+        if not self.sftp:
+            return
+        remote = self._current_remote(meta)
+        MediaPlayerDialog.open_remote(
+            self, self.sftp, self.ssh, remote, meta["kind"], sudo_user=self._sudo_user
+        )
 
     # ── Execution helpers ─────────────────────────────────────
     def _exec_file(self, meta):
@@ -842,7 +871,12 @@ class EC2FileManager(QMainWindow):
         errors = []
         for local in paths:
             remote = self.current_path.rstrip("/") + "/" + os.path.basename(local)
-            ok = FileTransferDialog.upload(self, self.sftp, local, remote)
+            ok = FileTransferDialog.upload(
+                self, self.sftp, local, remote,
+                host=self._conn_host, port=self._conn_port,
+                user=self._conn_user, pem=self._conn_pem,
+                sudo_user=self._sudo_user,
+            )
             if not ok:
                 errors.append(os.path.basename(local))
         if errors:
@@ -865,7 +899,12 @@ class EC2FileManager(QMainWindow):
         save, _ = QFileDialog.getSaveFileName(self, "Save As", default_path)
         if not save:
             return
-        FileTransferDialog.download(self, self.sftp, self._current_remote(meta), save)
+        FileTransferDialog.download(
+            self, self.sftp, self._current_remote(meta), save,
+            host=self._conn_host, port=self._conn_port,
+            user=self._conn_user, pem=self._conn_pem,
+            sudo_user=self._sudo_user,
+        )
         self.status.showMessage("Saved to {}".format(save))
 
     def _new_folder(self):
@@ -1003,21 +1042,9 @@ class EC2FileManager(QMainWindow):
         self.progress.show()
 
         worker = CommandWorker(self.ssh, cmd, cwd=self._terminal_cwd, sudo_user=self._sudo_user)
-
-        def on_done(out):
-            self._cmd_done(out, cmd)
-
-        def on_error(e):
-            self._cmd_done("[error] {}".format(e), cmd)
-
-        def on_finished():
-            if worker in self._workers:
-                self._workers.remove(worker)
-
-        worker.done.connect(on_done)
-        worker.error.connect(on_error)
-        worker.finished.connect(on_finished)
-        self._workers.append(worker)
+        worker.done.connect(lambda out: self._cmd_done(out, cmd))
+        worker.error.connect(lambda e: self._cmd_done("[error] {}".format(e), cmd))
+        track_worker(self._workers, worker)
         worker.start()
 
     def _on_terminal_interrupt(self):
@@ -1076,10 +1103,6 @@ class EC2FileManager(QMainWindow):
         full       = "{}{}> /dev/null 2>&1; pwd".format(cwd_prefix, cmd + " ")
         worker     = CommandWorker(self.ssh, full, sudo_user=self._sudo_user)
 
-        def on_finished():
-            if worker in self._cwd_workers:
-                self._cwd_workers.remove(worker)
-
         def on_done(out):
             self._set_terminal_cwd(out.strip().splitlines()[-1] if out.strip() else "")
             self.terminal.show_prompt(self._prompt_str())
@@ -1092,8 +1115,7 @@ class EC2FileManager(QMainWindow):
 
         worker.done.connect(on_done)
         worker.error.connect(on_error)
-        worker.finished.connect(on_finished)
-        self._cwd_workers.append(worker)
+        track_worker(self._cwd_workers, worker)
         worker.start()
         return True
 
@@ -1127,15 +1149,9 @@ class EC2FileManager(QMainWindow):
         # failed (no NOPASSWD rule, wrong username, etc).
         check_cmd = "sudo -n -u {} true".format(username)
         worker = CommandWorker(self.ssh, check_cmd)
-
-        def on_finished():
-            if worker in self._workers:
-                self._workers.remove(worker)
-
         worker.done.connect(lambda out: self._on_sudo_check(username, out))
         worker.error.connect(lambda err: self._on_sudo_check(username, err, hard_error=True))
-        worker.finished.connect(on_finished)
-        self._workers.append(worker)
+        track_worker(self._workers, worker)
         worker.start()
 
     def _on_sudo_check(self, username, output, hard_error=False):
@@ -1170,15 +1186,9 @@ class EC2FileManager(QMainWindow):
             self.ssh,
             "getent passwd {u} 2>/dev/null | cut -d: -f6".format(u=username)
         )
-
-        def on_home_finished():
-            if home_worker in self._workers:
-                self._workers.remove(home_worker)
-
         home_worker.done.connect(lambda out: self._apply_user_switch(username, out.strip()))
         home_worker.error.connect(lambda _: self._apply_user_switch(username, ""))
-        home_worker.finished.connect(on_home_finished)
-        self._workers.append(home_worker)
+        track_worker(self._workers, home_worker)
         home_worker.start()
 
     def _apply_user_switch(self, username, home):
@@ -1235,6 +1245,9 @@ class EC2FileManager(QMainWindow):
             else:
                 ext  = os.path.splitext(meta["name"])[1].lower()
                 kind = meta["kind"]
+
+                if kind in _MEDIA_KINDS:
+                    menu.addAction("▶  Play", lambda m=meta: self._play_media(m))
 
                 if kind in _EDITABLE_KINDS:
                     menu.addAction("✏️  Edit", lambda m=meta: self._edit_file(m))
