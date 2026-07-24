@@ -85,6 +85,7 @@ class EC2FileManager(QMainWindow):
         self._conn_port    = 22
         self._conn_user    = None  # type: Optional[str]
         self._conn_pem     = None  # type: Optional[str]
+        self._conn_password = None  # type: Optional[str]
         self._terminal_cwd = None  # type: Optional[str]
         self._pending_conn  = {}
         self._connecting_dlg = None
@@ -514,7 +515,17 @@ class EC2FileManager(QMainWindow):
             return
 
         # Stash the details needed once the background worker reports back.
-        self._pending_conn = dict(host=host, port=port, user=user, pem=pem, alias=alias)
+        # ConnectWorker prioritizes password over pem whenever both are
+        # present (see ConnectWorker.run()) — so if we blindly stashed
+        # whatever's in the pem field, a password-authenticated session
+        # with leftover/stale text in the pem field would later have
+        # FileTransferDialog pick the fast scp path using a key that has
+        # nothing to do with how this session actually authenticated,
+        # and every upload/download would fail. Only keep the pem here if
+        # it's actually the credential that's about to be used.
+        effective_pem = pem if not password else ""
+        self._pending_conn = dict(host=host, port=port, user=user, pem=effective_pem,
+                                   password=password, alias=alias)
 
         self.progress.show()
         self.status.showMessage("Connecting to {}…".format(host))
@@ -532,6 +543,7 @@ class EC2FileManager(QMainWindow):
     def _on_connect_success(self, ssh, sftp, home):
         info = self._pending_conn
         host, port, user, pem, alias = info["host"], info["port"], info["user"], info["pem"], info["alias"]
+        password = info.get("password")
 
         self.ssh  = ssh
         self.sftp = SudoFS(sftp, ssh)
@@ -539,6 +551,11 @@ class EC2FileManager(QMainWindow):
         self.host_label = alias if alias else "{}@{}".format(user, host)
         self._conn_host, self._conn_port = host, port
         self._conn_user, self._conn_pem  = user, pem
+        # Kept in memory for the rest of the session so uploads/downloads
+        # can use the fast scp path even on a password-authenticated
+        # connection — same trust boundary as the ConnectDialog holding it
+        # in a QLineEdit for the seconds it takes to connect, just longer.
+        self._conn_password = password
         self._set_connected(True)
         self.k8s_tab.set_ssh(self.ssh)
         # Local (client-side) connection details for the port-tunnel
@@ -577,6 +594,7 @@ class EC2FileManager(QMainWindow):
         self.ssh = self.sftp = None
         self._sudo_user = None
         self._conn_host = self._conn_user = self._conn_pem = None
+        self._conn_password = None
         self._conn_port = 22
         self.k8s_tab.set_ssh(None)
         self.k8s_tab.clear_connection_info()
@@ -769,6 +787,7 @@ class EC2FileManager(QMainWindow):
                     self, self.sftp, remote, save,
                     host=self._conn_host, port=self._conn_port,
                     user=self._conn_user, pem=self._conn_pem,
+                    password=self._conn_password,
                     sudo_user=self._sudo_user,
                 )
                 self.status.showMessage("Downloaded {}".format(name))
@@ -875,6 +894,7 @@ class EC2FileManager(QMainWindow):
                 self, self.sftp, local, remote,
                 host=self._conn_host, port=self._conn_port,
                 user=self._conn_user, pem=self._conn_pem,
+                password=self._conn_password,
                 sudo_user=self._sudo_user,
             )
             if not ok:
@@ -903,6 +923,7 @@ class EC2FileManager(QMainWindow):
             self, self.sftp, self._current_remote(meta), save,
             host=self._conn_host, port=self._conn_port,
             user=self._conn_user, pem=self._conn_pem,
+            password=self._conn_password,
             sudo_user=self._sudo_user,
         )
         self.status.showMessage("Saved to {}".format(save))

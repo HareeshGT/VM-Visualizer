@@ -54,10 +54,31 @@ class ConnectWorker(QThread):
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             kw = dict(hostname=self.host, port=self.port, username=self.user,
                       timeout=10, banner_timeout=10, auth_timeout=10)
-            if self.host in ["127.0.0.1", "localhost"] or self.password:
-                kw["password"] = self.password
+            if self.password:
+                # A real password was typed in — force straight password
+                # auth. Left at paramiko's defaults, look_for_keys/
+                # allow_agent are both True, so connect() tries every key
+                # in ~/.ssh and every identity in a running ssh-agent
+                # BEFORE ever trying this password — and if the server
+                # hard-rejects one of those (a passphrase-locked key it
+                # can't open, a key the server explicitly refuses, etc.),
+                # paramiko raises AuthenticationException right there and
+                # the password is never attempted. This is why "connect
+                # with password" could fail even with the correct password
+                # typed in. Forcing both off makes this a real password-
+                # only attempt, exactly like ssh -o
+                # PreferredAuthentications=password would.
+                kw["password"]      = self.password
+                kw["look_for_keys"] = False
+                kw["allow_agent"]   = False
             elif self.pem:
                 kw["key_filename"] = self.pem
+            elif self.host in ["127.0.0.1", "localhost"]:
+                # "Connect to Localhost" quick-button with no password/pem
+                # entered — leave look_for_keys/allow_agent at their
+                # defaults so a local ~/.ssh key or running ssh-agent can
+                # still authenticate, same as a bare `ssh user@localhost`.
+                pass
             ssh.connect(**kw)
 
             # Paramiko's default per-channel flow-control window is small
@@ -525,25 +546,30 @@ class ScpTransferWorker(QThread):
 
         scp -i key.pem ~/Downloads/4K.mp4 ec2-user@44.224.86.255:/home/ec2-user/gt/
 
-    This is only used for the plain (non-sudo) case with key-based auth —
-    a sudo-target upload/download still goes through SudoFS/_TransferWorker,
-    since that path already needs a second hop (upload to a tmp path, then
-    ``sudo mv`` over the existing ssh session) that a single scp invocation
-    can't express, and password-only auth has no non-interactive way to
-    feed scp a password without a helper like sshpass.
+    This is only used for the plain (non-sudo) case — a sudo-target
+    upload/download still goes through SudoFS/_TransferWorker, since that
+    path already needs a second hop (upload to a tmp path, then ``sudo mv``
+    over the existing ssh session) that a single scp invocation can't
+    express. Both key- and password-authenticated connections use scp:
+    for a password, this worker answers scp's own "password:" prompt
+    itself over the pty below, the same way a person typing it by hand
+    would — no external helper (sshpass, etc.) needed.
     """
 
     progress     = pyqtSignal(int, int)   # bytes_done (estimated from scp's own % ), bytes_total
     finished_ok  = pyqtSignal()
     finished_err = pyqtSignal(str)
 
-    def __init__(self, host, port, user, pem, direction, local_path, remote_path, total_size=None):
-        # type: (str, int, str, str, str, str, str, Optional[int]) -> None
+    _PASSWORD_PROMPT_RE = re.compile(rb"(?i)password:\s*$")
+
+    def __init__(self, host, port, user, pem, password, direction, local_path, remote_path, total_size=None):
+        # type: (str, int, str, str, str, str, str, str, Optional[int]) -> None
         super().__init__()
         self._host      = host
         self._port      = port or 22
         self._user      = user
         self._pem       = pem
+        self._password  = password or None
         self._direction = direction        # "upload" | "download"
         self._local     = local_path
         self._remote    = remote_path
@@ -568,18 +594,26 @@ class ScpTransferWorker(QThread):
         else:
             src, dst = remote_spec, self._local
 
-        cmd = ["scp"]
-        # Never let scp block forever on an unknown/changed host key or a
-        # password prompt with no terminal attached to answer it — this
-        # runs headless from a QThread, so a hang here would just look like
-        # a stuck progress bar with no way to cancel cleanly. BatchMode
-        # disables all interactive prompts (falling straight to an error
-        # instead); accept-new auto-trusts a host key we haven't seen
-        # before but still refuses one that *changed*, same as ssh would
-        # warn about interactively.
-        cmd += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+        cmd = ["scp", "-o", "StrictHostKeyChecking=accept-new"]
+        # accept-new auto-trusts a host key we haven't seen before but
+        # still refuses one that *changed*, same as ssh would warn about
+        # interactively — either way we're not left hanging on that prompt.
         if self._pem:
-            cmd += ["-i", self._pem]
+            # Fully unattended: BatchMode disables every interactive
+            # prompt (falling straight to an error instead), which is
+            # safe here since a key is what's actually authenticating.
+            cmd += ["-o", "BatchMode=yes", "-i", self._pem]
+        elif self._password:
+            # We're about to answer scp's password prompt ourselves over
+            # the pty (see run()), so BatchMode must stay off here. Skip
+            # local ~/.ssh keys and any running ssh-agent identity so a
+            # hard rejection from one of those can't derail this into a
+            # failure before the password prompt even shows up — the same
+            # class of bug fixed on the paramiko side in ConnectWorker.
+            # NumberOfPasswordPrompts=1 means a wrong password fails fast
+            # instead of scp silently re-prompting for a password we're
+            # not going to answer again.
+            cmd += ["-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1"]
         if self._port and int(self._port) != 22:
             cmd += ["-P", str(self._port)]
         cmd += [src, dst]
@@ -660,8 +694,9 @@ class ScpTransferWorker(QThread):
 
         self._proc = proc  # so cancel() can kill whichever kind this is
 
-        buf      = b""
-        last_pct = -1
+        buf           = b""
+        last_pct      = -1
+        password_sent = not bool(self._password)
         # Drive this off the process's own exit status (poll()), not off
         # read() returning EOF. ssh/scp can leave the pty/pipe's write end
         # referenced by a lingering child process even after the transfer
@@ -693,6 +728,24 @@ class ScpTransferWorker(QThread):
                 if chunk:
                     got_data = True
                     buf += chunk
+
+                    # scp's "ec2-user@1.2.3.4's password: " prompt has no
+                    # trailing \r or \n — ssh just sits there waiting for
+                    # input right after it — so the \r/\n line-splitting
+                    # below would never see it; it'd sit in buf forever
+                    # while we wait on a prompt nobody answers. Check for
+                    # it directly against the raw buffer instead, and type
+                    # the password back through the pty exactly like a
+                    # person would (ssh disables local echo while reading
+                    # it, so it never comes back through our own read()).
+                    if not password_sent and self._PASSWORD_PROMPT_RE.search(buf[-64:]):
+                        try:
+                            os.write(read_fd, (self._password + "\n").encode())
+                        except OSError:
+                            pass
+                        password_sent = True
+                        buf = b""  # the prompt text itself has no % to parse
+
                     while b"\r" in buf or b"\n" in buf:
                         idx_r = buf.find(b"\r")
                         idx_n = buf.find(b"\n")

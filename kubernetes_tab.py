@@ -218,6 +218,7 @@ class KubernetesTab(QWidget):
         self.pod_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.pod_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.pod_tree.customContextMenuRequested.connect(self._pod_ctx_menu)
+        self.pod_tree.itemDoubleClicked.connect(self._on_pod_double_click)
         self.pod_tree.setColumnCount(8)
         self.pod_tree.setHeaderLabels(["Namespace", "Name", "Ready", "Status", "Restarts", "Age", "IP", "Node"])
         hdr = self.pod_tree.header()
@@ -277,14 +278,20 @@ class KubernetesTab(QWidget):
         self._style_tree(self.deploy_tree)
         self.deploy_tree.setRootIsDecorated(False)
         self.deploy_tree.setAlternatingRowColors(True)
-        self.deploy_tree.setColumnCount(6)
-        self.deploy_tree.setHeaderLabels(["Name", "Ready", "Up-to-date", "Available", "Age", "Images"])
+        self.deploy_tree.setColumnCount(7)
+        self.deploy_tree.setHeaderLabels(["Namespace", "Name", "Ready", "Up-to-date", "Available", "Age", "Images"])
         hdr = self.deploy_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(5, QHeaderView.Stretch)
-        for i in range(1, 5):
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        for i in range(2, 6):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        # Namespace column is only meaningful in "(all namespaces)" view — when a
+        # specific namespace is selected every row would repeat the same value, so
+        # we hide the column and let the ns_combo above speak for itself instead.
+        self.deploy_tree.setColumnHidden(0, True)
         self.deploy_tree.itemClicked.connect(self._on_deploy_click)
+        self.deploy_tree.itemDoubleClicked.connect(self._on_deploy_double_click)
         lay.addWidget(self.deploy_tree)
         self.sub_tabs.addTab(w, "🚀  Deployments")
 
@@ -816,6 +823,17 @@ class KubernetesTab(QWidget):
             ns = "default"
         return item.text(1), ns
 
+    def _on_pod_double_click(self, item, column=0):
+        """Double-clicking a pod row is a shortcut for Describe — reads
+        name/namespace off the row that was actually double-clicked rather
+        than relying on _selected_pod()'s currentItem(), since a
+        double-click's second press is what sets the current item and
+        there's no reason to depend on that timing."""
+        ns = item.text(0) if self._current_ns == "(all namespaces)" else self._current_ns
+        if not ns or ns == "(all namespaces)":
+            ns = "default"
+        self._describe("pod", item.text(1), ns)
+
     def _pod_logs(self):
         pod, ns = self._selected_pod()
         if pod:
@@ -864,17 +882,30 @@ class KubernetesTab(QWidget):
 
     def _populate_deployments(self, out: str):
         self.deploy_tree.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        self.deploy_tree.setColumnHidden(0, not all_ns)
         for line in out.strip().splitlines()[1:]:
             parts = line.split()
-            if len(parts) < 5:
-                continue
-            name, ready, upd, avail, age = parts[:5]
-            imgs = " | ".join(parts[5:]) if len(parts) > 5 else "-"
-            item = QTreeWidgetItem([name, ready, upd, avail, age, imgs])
-            item.setFont(0, monospace_font(11))
+            if all_ns:
+                # `kubectl get deployments --all-namespaces -o wide` prepends
+                # NAMESPACE — without accounting for it, every column below
+                # silently shifts left by one (Name shows the namespace,
+                # Ready shows the name, and so on).
+                if len(parts) < 6:
+                    continue
+                ns, name, ready, upd, avail, age = parts[:6]
+                imgs = " | ".join(parts[6:]) if len(parts) > 6 else "-"
+            else:
+                if len(parts) < 5:
+                    continue
+                ns = self._current_ns or "default"
+                name, ready, upd, avail, age = parts[:5]
+                imgs = " | ".join(parts[5:]) if len(parts) > 5 else "-"
+            item = QTreeWidgetItem([ns, name, ready, upd, avail, age, imgs])
+            item.setFont(1, monospace_font(11))
             try:
                 cur, desired = ready.split("/")
-                item.setForeground(1, QColor(T['SUCCESS'] if cur == desired else T['WARNING']))
+                item.setForeground(2, QColor(T['SUCCESS'] if cur == desired else T['WARNING']))
             except Exception:
                 pass
             self.deploy_tree.addTopLevelItem(item)
@@ -884,24 +915,33 @@ class KubernetesTab(QWidget):
 
     def _on_deploy_click(self, item):
         try:
-            _, desired = item.text(1).split("/")
+            _, desired = item.text(2).split("/")
             self.scale_spin.setValue(int(desired))
         except Exception:
             pass
+
+    def _on_deploy_double_click(self, item, column=0):
+        """Double-clicking a deployment row is a shortcut for Describe —
+        reads name/namespace off the row that was actually double-clicked,
+        same reasoning as _on_pod_double_click above."""
+        all_ns = (self._current_ns == "(all namespaces)")
+        ns = item.text(0) if all_ns else (self._current_ns or "default")
+        self._describe("deployment", item.text(1), ns)
 
     def _filter_deployments(self, text: str):
         q = text.lower()
         for i in range(self.deploy_tree.topLevelItemCount()):
             item = self.deploy_tree.topLevelItem(i)
-            item.setHidden(q not in item.text(0).lower())
+            item.setHidden(q not in item.text(1).lower())
 
     def _selected_deploy(self) -> tuple:  # (Optional[str], str)
         item = self.deploy_tree.currentItem()
         if not item:
             QMessageBox.warning(self, "No selection", "Select a deployment first.")
             return None, ""
-        ns = self._current_ns if self._current_ns != "(all namespaces)" else "default"
-        return item.text(0), ns
+        all_ns = (self._current_ns == "(all namespaces)")
+        ns = item.text(0) if all_ns else (self._current_ns or "default")
+        return item.text(1), ns
 
     def _deploy_scale(self):
         dep, ns = self._selected_deploy()

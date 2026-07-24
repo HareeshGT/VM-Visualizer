@@ -41,7 +41,7 @@ class FileTransferDialog(QDialog):
 
     def __init__(self, parent, sftp, direction: str, local_path: str, remote_path: str,
                  host: str = None, port: int = 22, user: str = None, pem: str = None,
-                 sudo_user: str = None):
+                 password: str = None, sudo_user: str = None):
         super().__init__(parent)
         self._direction  = direction
         self._local      = local_path
@@ -133,12 +133,13 @@ class FileTransferDialog(QDialog):
         self._t0 = time.monotonic()
 
         # Use real `scp` on the app's host machine when we can: a plain
-        # (non-sudo) key-authenticated connection. A sudo-target transfer
-        # still needs the SudoFS two-hop dance (upload to a tmp path, then
-        # `sudo mv` over ssh), and password-only auth has no clean
-        # non-interactive way to hand scp a password — both of those keep
-        # using the SFTP path instead.
-        use_scp = bool(pem) and bool(host) and bool(user) and not sudo_user
+        # (non-sudo) connection, whether key- or password-authenticated —
+        # ScpTransferWorker answers scp's password prompt itself over the
+        # pty it already opens for the progress meter. A sudo-target
+        # transfer still needs the SudoFS two-hop dance (upload to a tmp
+        # path, then `sudo mv` over ssh), which a single scp invocation
+        # can't express, so that keeps using the SFTP path.
+        use_scp = bool(host) and bool(user) and not sudo_user and (bool(pem) or bool(password))
         total_size = None
         if use_scp:
             try:
@@ -151,7 +152,7 @@ class FileTransferDialog(QDialog):
 
         if use_scp:
             self._worker = ScpTransferWorker(
-                host, port, user, pem, direction, local_path, remote_path, total_size
+                host, port, user, pem, password, direction, local_path, remote_path, total_size
             )
         else:
             self._worker = _TransferWorker(sftp, direction, local_path, remote_path)
@@ -241,17 +242,19 @@ class FileTransferDialog(QDialog):
     @classmethod
     def download(cls, parent, sftp, remote_path: str, local_path: str,
                  host: str = None, port: int = 22, user: str = None, pem: str = None,
-                 sudo_user: str = None) -> bool:
+                 password: str = None, sudo_user: str = None) -> bool:
         dlg = cls(parent, sftp, "download", local_path, remote_path,
-                  host=host, port=port, user=user, pem=pem, sudo_user=sudo_user)
+                  host=host, port=port, user=user, pem=pem, password=password,
+                  sudo_user=sudo_user)
         return dlg.exec_() == QDialog.Accepted
 
     @classmethod
     def upload(cls, parent, sftp, local_path: str, remote_path: str,
                host: str = None, port: int = 22, user: str = None, pem: str = None,
-               sudo_user: str = None) -> bool:
+               password: str = None, sudo_user: str = None) -> bool:
         dlg = cls(parent, sftp, "upload", local_path, remote_path,
-                  host=host, port=port, user=user, pem=pem, sudo_user=sudo_user)
+                  host=host, port=port, user=user, pem=pem, password=password,
+                  sudo_user=sudo_user)
         return dlg.exec_() == QDialog.Accepted
 
 
