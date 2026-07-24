@@ -2,6 +2,7 @@
 
 import os
 import re
+import signal
 import mimetypes
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -465,6 +466,51 @@ class _TransferWorker(QThread):
                         done += len(buf)
                         self.progress.emit(done, total)
 
+class _PtyProc:
+    """Wraps an os.forkpty() child so the read loop below can treat it the
+    same way it treats a subprocess.Popen object — .poll() / .wait() /
+    .kill(), nothing loop-specific has to know which one it's holding."""
+
+    def __init__(self, pid: int, master_fd: int):
+        self.pid       = pid
+        self.master_fd = master_fd
+        self._status   = None
+
+    def fileno(self) -> int:
+        return self.master_fd
+
+    def poll(self):
+        """None while still running, else the exit code."""
+        if self._status is not None:
+            return self._status
+        try:
+            wpid, status = os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            self._status = 0
+            return self._status
+        if wpid == 0:
+            return None
+        self._status = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+        return self._status
+
+    def wait(self):
+        if self._status is not None:
+            return self._status
+        try:
+            _, status = os.waitpid(self.pid, 0)
+        except ChildProcessError:
+            self._status = 0
+            return self._status
+        self._status = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+        return self._status
+
+    def kill(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
 class ScpTransferWorker(QThread):
     """Runs a single upload/download as a real ``scp`` subprocess on the
     machine this app is running on, instead of shuttling bytes through
@@ -551,6 +597,7 @@ class ScpTransferWorker(QThread):
 
     def run(self):
         import subprocess
+        import select
 
         if not self._total and self._direction == "upload":
             try:
@@ -559,53 +606,117 @@ class ScpTransferWorker(QThread):
                 self._total = 0
 
         cmd = self._build_cmd()
-        try:
-            self._proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
-            )
-        except FileNotFoundError:
-            self.finished_err.emit(
-                "The 'scp' command isn't available on this machine. Install "
-                "an OpenSSH client (or check your network/PATH settings)."
-            )
-            return
-        except Exception as e:
-            self.finished_err.emit(str(e))
-            return
 
-        buf       = b""
-        last_pct  = -1
-        # scp's progress meter rewrites the same line with '\r' rather than
-        # ending it with '\n' — a plain line-oriented read (readline()) would
-        # just block waiting for a '\n' that doesn't show up until the whole
-        # transfer (or, for multi-file scp, the next file) finishes. Read
-        # raw bytes instead and split on either '\r' or '\n' ourselves so
-        # each progress update is seen as it happens.
+        # scp's progress meter is gated on more than just "is stdout a tty":
+        # OpenSSH also checks that the process is running in the
+        # *foreground* of that terminal's session (tcgetpgrp), which needs
+        # a real controlling terminal, not just a tty-typed file descriptor.
+        # Handing a plain pty slave fd to subprocess.Popen (via
+        # pty.openpty()) gives scp a tty it can isatty()-check, but the
+        # child is never made a session leader or given that pty as its
+        # controlling terminal — so the foreground check still fails and
+        # the meter stays off, exactly like a plain pipe. os.forkpty() is
+        # the version that actually does the setsid()-and-attach dance (the
+        # same mechanism the `script` command and tools like pexpect use),
+        # so scp behaves exactly as it does when a person runs it by hand.
+        pid       = None
+        master_fd = None
+        try:
+            pid, master_fd = os.forkpty()
+        except (AttributeError, OSError):
+            pid = None
+
+        if pid == 0:
+            # Child: this thread's Python state ends here — replace the
+            # process image immediately with the real scp binary. cmd was
+            # already fully built before the fork, so there's nothing left
+            # to compute (allocate/lock) in the child beforehand.
+            try:
+                os.execvp(cmd[0], cmd)
+            finally:
+                os._exit(127)  # only reached if execvp itself failed
+
+        if pid is not None:
+            proc    = _PtyProc(pid, master_fd)
+            read_fd = master_fd
+        else:
+            # forkpty() unavailable for some reason — fall back to a plain
+            # pipe. No live progress meter from scp in this case, but the
+            # transfer and the exit-detection logic below still work.
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+                )
+            except FileNotFoundError:
+                self.finished_err.emit(
+                    "The 'scp' command isn't available on this machine. Install "
+                    "an OpenSSH client (or check your network/PATH settings)."
+                )
+                return
+            except Exception as e:
+                self.finished_err.emit(str(e))
+                return
+            read_fd = proc.stdout.fileno()
+
+        self._proc = proc  # so cancel() can kill whichever kind this is
+
+        buf      = b""
+        last_pct = -1
+        # Drive this off the process's own exit status (poll()), not off
+        # read() returning EOF. ssh/scp can leave the pty/pipe's write end
+        # referenced by a lingering child process even after the transfer
+        # you actually care about has finished, so waiting for a real EOF
+        # can hang indefinitely with the file already fully uploaded on the
+        # other end. Polling for process exit alongside a short select()
+        # timeout means we notice the moment scp itself is done, and only
+        # keep reading in the meantime to surface live progress.
         while True:
             if self._cancelled:
-                try:
-                    self._proc.kill()
-                except Exception:
-                    pass
-                return
-            chunk = self._proc.stdout.read(4096)
-            if not chunk:
+                proc.kill()
                 break
-            buf += chunk
-            while b"\r" in buf or b"\n" in buf:
-                idx_r = buf.find(b"\r")
-                idx_n = buf.find(b"\n")
-                idx   = min(i for i in (idx_r, idx_n) if i != -1)
-                line, buf = buf[:idx], buf[idx + 1:]
-                pct = self._parse_pct(line)
-                if pct is not None and pct != last_pct:
-                    last_pct = pct
-                    done = int(self._total * pct / 100) if self._total else pct
-                    self.progress.emit(done, self._total)
 
-        ret = self._proc.wait()
+            exit_code = proc.poll()
+            try:
+                rlist, _, _ = select.select([read_fd], [], [], 0.2)
+            except (OSError, ValueError):
+                rlist = []
+
+            got_data = False
+            if rlist:
+                try:
+                    chunk = os.read(read_fd, 4096)
+                except OSError:
+                    # A pty raises EIO once the slave side is fully closed,
+                    # instead of returning b"" like a pipe would — treat it
+                    # the same as "nothing more to read right now".
+                    chunk = b""
+                if chunk:
+                    got_data = True
+                    buf += chunk
+                    while b"\r" in buf or b"\n" in buf:
+                        idx_r = buf.find(b"\r")
+                        idx_n = buf.find(b"\n")
+                        idx   = min(i for i in (idx_r, idx_n) if i != -1)
+                        line, buf = buf[:idx], buf[idx + 1:]
+                        pct = self._parse_pct(line)
+                        if pct is not None and pct != last_pct:
+                            last_pct = pct
+                            done = int(self._total * pct / 100) if self._total else pct
+                            self.progress.emit(done, self._total)
+
+            if not got_data and exit_code is not None:
+                break
+
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except Exception:
+                pass
+
         if self._cancelled:
             return
+
+        ret = proc.wait()
         if ret != 0:
             tail = buf.decode(errors="replace").strip()
             self.finished_err.emit(tail or "scp exited with status {}".format(ret))
