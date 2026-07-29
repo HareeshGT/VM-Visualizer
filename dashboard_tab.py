@@ -29,7 +29,7 @@ import time
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QProgressBar, QTreeWidget, QTreeWidgetItem,
+    QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem,
     QSizePolicy,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -38,6 +38,7 @@ from PyQt5.QtGui import QColor
 from themes import T
 from workers import CommandWorker, track_worker
 from utils import monospace_font
+from progress_ring import CircularProgress
 
 
 REFRESH_MS = 6000  # live-dashboard cadence while the tab is visible
@@ -363,6 +364,8 @@ class DashboardTab(QWidget):
     def apply_theme(self):
         self._apply_styles()
         self._style_tree(self.k8s_tree)
+        self.cpu_ring["ring"].refresh_theme()
+        self.mem_ring["ring"].refresh_theme()
         for win in self._node_windows.values():
             win.refresh_theme()
 
@@ -415,9 +418,28 @@ class DashboardTab(QWidget):
         vm_body = QVBoxLayout()
         vm_body.setSpacing(10)
 
+        # Top row: CPU/Memory rings on the left, instance detail fields on
+        # the right — previously the fields sat in their own row above the
+        # rings, leaving the whole right-hand side of the rings row empty.
+        top_row = QHBoxLayout()
+        top_row.setSpacing(40)
+
+        rings_row = QHBoxLayout()
+        rings_row.setSpacing(48)
+        self.cpu_ring = self._labeled_ring("CPU usage")
+        rings_row.addLayout(self.cpu_ring["layout"])
+        self.mem_ring = self._labeled_ring("Memory usage")
+        rings_row.addLayout(self.mem_ring["layout"])
+        top_row.addLayout(rings_row)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setStyleSheet(f"color: {T['BORDER']};")
+        top_row.addWidget(divider)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(6)
+        grid.setVerticalSpacing(10)
         self._vm_fields = {}
         for row, (key, label) in enumerate([
             ("hostname", "Hostname"), ("os", "OS"),
@@ -429,15 +451,13 @@ class DashboardTab(QWidget):
             lv = QLabel("—")
             lv.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 12px;")
             lv.setWordWrap(True)
-            grid.addWidget(lk, row // 2, (row % 2) * 2)
-            grid.addWidget(lv, row // 2, (row % 2) * 2 + 1)
+            grid.addWidget(lk, row, 0)
+            grid.addWidget(lv, row, 1)
             self._vm_fields[key] = lv
-        vm_body.addLayout(grid)
+        grid.setColumnStretch(1, 1)
+        top_row.addLayout(grid, 1)
 
-        self.cpu_bar = self._labeled_bar("CPU usage")
-        vm_body.addLayout(self.cpu_bar["layout"])
-        self.mem_bar = self._labeled_bar("Memory usage")
-        vm_body.addLayout(self.mem_bar["layout"])
+        vm_body.addLayout(top_row)
 
         disk_lbl = QLabel("Disk")
         disk_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px; font-weight: 700;")
@@ -504,39 +524,39 @@ class DashboardTab(QWidget):
         outer.addLayout(body)
         return {"frame": frame, "title_lbl": lbl, "body": outer}
 
-    def _labeled_bar(self, label: str) -> dict:
-        lay = QHBoxLayout()
-        lay.setSpacing(10)
+    def _labeled_ring(self, label: str) -> dict:
+        """A vertical block — label on top, a large centred ring, value
+        readout underneath. Two of these placed in a QHBoxLayout (see
+        _build_ui) put CPU and Memory side by side instead of stacked."""
+        col = QVBoxLayout()
+        col.setSpacing(8)
+
         lk = QLabel(label)
-        lk.setFixedWidth(100)
-        lk.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        bar.setValue(0)
-        bar.setFixedHeight(16)
-        bar.setTextVisible(True)
+        lk.setAlignment(Qt.AlignHCenter)
+        lk.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px; font-weight: 700;")
+        col.addWidget(lk)
+
+        ring = CircularProgress(size=140, thickness=12, show_text=True, font_size=24)
+        ring_row = QHBoxLayout()
+        ring_row.addStretch(1)
+        ring_row.addWidget(ring)
+        ring_row.addStretch(1)
+        col.addLayout(ring_row)
+
         val_lbl = QLabel("—")
+        val_lbl.setAlignment(Qt.AlignHCenter)
         val_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
-        val_lbl.setFixedWidth(150)
-        lay.addWidget(lk)
-        lay.addWidget(bar, 1)
-        lay.addWidget(val_lbl)
-        return {"layout": lay, "bar": bar, "val_lbl": val_lbl}
+        col.addWidget(val_lbl)
+
+        return {"layout": col, "ring": ring, "val_lbl": val_lbl}
 
     def _style_tree(self, tree):
         tree.setFont(monospace_font(12))
         tree.setStyleSheet(f"QTreeWidget {{ font-size: 12px; }} "
                             f"QTreeWidget::item {{ height: 30px; }}")
 
-    def _style_bar(self, bar: QProgressBar, pct: float):
-        color = _pct_color(pct)
-        bar.setValue(max(0, min(100, int(round(pct)))))
-        bar.setFormat(f"{pct:.0f}%")
-        bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid {T['BORDER']}; border-radius: 4px; "
-            f"background: {T['BG_ITEM']}; text-align: center; color: {T['TEXT_PRIMARY']}; }}"
-            f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
-        )
+    def _style_ring(self, ring: CircularProgress, pct: float):
+        ring.setValue(pct, _pct_color(pct))
 
     def _apply_styles(self):
         self.ctrl_bar.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
@@ -639,14 +659,14 @@ class DashboardTab(QWidget):
                     except ValueError:
                         pass
         if cpu_pct is not None:
-            self._style_bar(self.cpu_bar["bar"], cpu_pct)
-            self.cpu_bar["val_lbl"].setText(f"{cpu_pct:.0f}% busy")
+            self._style_ring(self.cpu_ring["ring"], cpu_pct)
+            self.cpu_ring["val_lbl"].setText(f"{cpu_pct:.0f}% busy")
         else:
-            # Reset the bar too, not just the label — otherwise a bar that
+            # Reset the ring too, not just the label — otherwise a ring that
             # was populated by an earlier successful refresh keeps showing
             # that stale value forever once this stat becomes unavailable.
-            self.cpu_bar["bar"].setValue(0)
-            self.cpu_bar["val_lbl"].setText("unavailable")
+            self.cpu_ring["ring"].setValue(0)
+            self.cpu_ring["val_lbl"].setText("unavailable")
 
         # Memory — a "Mem: total used free shared buff/cache available"
         # line, same shape whether it came from Linux `free -m` or the
@@ -658,16 +678,16 @@ class DashboardTab(QWidget):
             try:
                 total_mb, used_mb = float(parts[1]), float(parts[2])
                 mem_pct = (used_mb / total_mb * 100.0) if total_mb else 0.0
-                self._style_bar(self.mem_bar["bar"], mem_pct)
-                self.mem_bar["val_lbl"].setText(
+                self._style_ring(self.mem_ring["ring"], mem_pct)
+                self.mem_ring["val_lbl"].setText(
                     f"{used_mb/1024:.1f} / {total_mb/1024:.1f} GB"
                 )
             except (ValueError, IndexError):
-                self.mem_bar["bar"].setValue(0)
-                self.mem_bar["val_lbl"].setText("unavailable")
+                self.mem_ring["ring"].setValue(0)
+                self.mem_ring["val_lbl"].setText("unavailable")
         else:
-            self.mem_bar["bar"].setValue(0)
-            self.mem_bar["val_lbl"].setText("unavailable")
+            self.mem_ring["ring"].setValue(0)
+            self.mem_ring["val_lbl"].setText("unavailable")
 
         # Disk mounts
         self.disk_tree.clear()
@@ -814,11 +834,21 @@ class DashboardTab(QWidget):
                 if t is not None:
                     try:
                         pct = float(t[key])
-                        bar = QProgressBar()
-                        bar.setRange(0, 100)
-                        bar.setFixedHeight(18)
-                        self._style_bar(bar, pct)
-                        self.k8s_tree.setItemWidget(item, col, bar)
+                        # A mini ring in place of the old QProgressBar — a
+                        # narrow table column has little width to spare, and
+                        # a ring reads its percentage without needing one.
+                        ring = CircularProgress(
+                            size=26, thickness=4, show_text=True,
+                            font_size=6, suffix="",
+                        )
+                        self._style_ring(ring, pct)
+                        ring.setToolTip(f"{pct:.0f}%")
+                        holder = QWidget()
+                        hl = QHBoxLayout(holder)
+                        hl.setContentsMargins(0, 0, 0, 0)
+                        hl.addWidget(ring)
+                        hl.setAlignment(Qt.AlignCenter)
+                        self.k8s_tree.setItemWidget(item, col, holder)
                         continue
                     except ValueError:
                         pass

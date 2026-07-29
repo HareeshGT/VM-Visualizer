@@ -13,9 +13,9 @@ from PyQt5.QtWidgets import (
     QMessageBox, QTextEdit, QSplitter, QStatusBar, QFrame,
     QSizePolicy, QDialog, QDialogButtonBox, QInputDialog, QMenu,
     QAbstractItemView, QProgressBar, QTabWidget, QComboBox,
-    QApplication, QShortcut,
+    QApplication, QShortcut, QGraphicsOpacityEffect,
 )
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
 
 import themes as _themes
@@ -88,6 +88,7 @@ class EC2FileManager(QMainWindow):
         self._conn_pem     = None  # type: Optional[str]
         self._conn_password = None  # type: Optional[str]
         self._terminal_cwd = None  # type: Optional[str]
+        self._theme_fade_anim = None  # keeps the QPropertyAnimation alive while running
         self._pending_conn  = {}
         self._connecting_dlg = None
         self._connect_worker = None
@@ -402,6 +403,57 @@ class EC2FileManager(QMainWindow):
 
     # ── Theme ─────────────────────────────────────────────────
     def _change_theme(self, theme_name):
+        """Cross-fade into the new theme instead of slamming every colour
+        in on a single frame — restyling the whole window (QSS, palette,
+        every tab) happens instantly either way, so the fade is what
+        makes the switch itself read as smooth rather than a jump-cut."""
+        central = self.centralWidget()
+
+        # A second theme pick while one is still fading: finish the style
+        # swap for the theme already in flight, then start this one clean
+        # rather than layering animations on top of each other.
+        if self._theme_fade_anim is not None:
+            self._theme_fade_anim.stop()
+            self._theme_fade_anim = None
+
+        effect = QGraphicsOpacityEffect(central)
+        central.setGraphicsEffect(effect)
+
+        fade_out = QPropertyAnimation(effect, b"opacity", central)
+        fade_out.setDuration(90)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.12)
+        fade_out.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _swap_and_fade_in():
+            self._apply_theme_change(theme_name)
+
+            fade_in = QPropertyAnimation(effect, b"opacity", central)
+            fade_in.setDuration(180)
+            fade_in.setStartValue(0.12)
+            fade_in.setEndValue(1.0)
+            fade_in.setEasingCurve(QEasingCurve.InCubic)
+
+            def _teardown():
+                # Drop the effect once it's done its job — leaving a
+                # QGraphicsOpacityEffect attached permanently forces every
+                # repaint of the whole window through an extra compositing
+                # pass for no benefit once opacity is back to 1.0.
+                central.setGraphicsEffect(None)
+                self._theme_fade_anim = None
+
+            fade_in.finished.connect(_teardown)
+            self._theme_fade_anim = fade_in
+            fade_in.start()
+
+        fade_out.finished.connect(_swap_and_fade_in)
+        self._theme_fade_anim = fade_out
+        fade_out.start()
+
+    def _apply_theme_change(self, theme_name):
+        """The actual restyle: swap the palette dict, rebuild QSS, and push
+        refreshed styles into every tab. Runs at the faded-out midpoint of
+        _change_theme's cross-fade so the color jump itself is hidden."""
         apply_theme_vars(theme_name)
         save_settings()
         qss = build_qss()
