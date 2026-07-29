@@ -249,7 +249,7 @@ class FileStreamReadWorker(QThread):
 
     progress     = pyqtSignal(int, int)   # bytes_done, bytes_total (total==0 if unknown)
     chunk_ready  = pyqtSignal(bytes)      # each chunk, as it arrives — lets a caller render live
-    finished_ok  = pyqtSignal(bytes)      # full content, once the read completes (or hits max_bytes)
+    finished_ok  = pyqtSignal(int)        # total bytes read, once the read completes (or hits max_bytes)
     finished_err = pyqtSignal(str)
 
     CHUNK_SIZE = 64 * 1024
@@ -285,7 +285,6 @@ class FileStreamReadWorker(QThread):
         except Exception:
             total = 0
 
-        chunks = []
         done   = 0
         with raw.open(self._remote, "rb") as f:
             try:
@@ -299,13 +298,12 @@ class FileStreamReadWorker(QThread):
                 buf = f.read(self.CHUNK_SIZE)
                 if not buf:
                     break
-                chunks.append(buf)
                 done += len(buf)
                 self.chunk_ready.emit(buf)
                 self.progress.emit(done, total)
                 if self._max_bytes and done >= self._max_bytes:
                     break
-        self.finished_ok.emit(b"".join(chunks))
+        self.finished_ok.emit(done)
 
     # ── sudo path — stream a "sudo -u <user> cat" over a raw channel ──
     def _run_sudo_stream(self):
@@ -322,7 +320,6 @@ class FileStreamReadWorker(QThread):
         channel.settimeout(0.5)
         channel.exec_command(cmd)
 
-        chunks = []
         done   = 0
         while True:
             if self._cancelled:
@@ -332,7 +329,6 @@ class FileStreamReadWorker(QThread):
                 if channel.recv_ready():
                     buf = channel.recv(self.CHUNK_SIZE)
                     if buf:
-                        chunks.append(buf)
                         done += len(buf)
                         self.chunk_ready.emit(buf)
                         self.progress.emit(done, total)
@@ -346,7 +342,7 @@ class FileStreamReadWorker(QThread):
                 break
             self.msleep(30)
 
-        self.finished_ok.emit(b"".join(chunks))
+        self.finished_ok.emit(done)
 
 
 class _TransferWorker(QThread):

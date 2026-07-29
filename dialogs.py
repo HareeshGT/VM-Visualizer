@@ -863,7 +863,7 @@ class FileEditorDialog(QDialog):
         ea_lay.setContentsMargins(0, 0, 0, 0)
         ea_lay.setSpacing(0)
 
-        self._line_nums = QTextEdit()
+        self._line_nums = QPlainTextEdit()
         self._line_nums.setReadOnly(True)
         self._line_nums.setFixedWidth(52)
         self._line_nums.setFont(monospace_font(12))
@@ -875,7 +875,14 @@ class FileEditorDialog(QDialog):
         self._line_nums.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         ea_lay.addWidget(self._line_nums)
 
-        self.editor = QTextEdit()
+        # QPlainTextEdit (not QTextEdit) — QTextEdit's QTextDocument backs
+        # every character with rich-text formatting/table machinery that a
+        # plain-text file never uses, so for a large file it carries real
+        # memory overhead for nothing. QPlainTextEdit is the same
+        # QTextDocument-based widget minus that overhead, and every API
+        # this dialog relies on (textCursor, find, document(), toPlainText,
+        # setPlainText, textChanged, cursorPositionChanged) works the same.
+        self.editor = QPlainTextEdit()
         self.editor.setFont(monospace_font(12))
         self.editor.setStyleSheet(
             f"background: {T['BG_DARK']}; color: {T['TEXT_PRIMARY']}; "
@@ -937,7 +944,7 @@ class FileEditorDialog(QDialog):
 
     # ── Helpers ───────────────────────────────────────────────
     def _toggle_wrap(self, on: bool):
-        self.editor.setLineWrapMode(QTextEdit.WidgetWidth if on else QTextEdit.NoWrap)
+        self.editor.setLineWrapMode(QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap)
 
     def _toggle_find_bar(self, on: bool):
         self._find_bar.setVisible(on)
@@ -978,6 +985,13 @@ class FileEditorDialog(QDialog):
         self._load_bar.show()
         self._load_bar.setRange(0, 0)
         self._set_status("Loading…", T['WARNING'])
+
+        # Undo/redo would otherwise record every one of the ~240 chunk
+        # inserts that make up a big file's load as its own undo command —
+        # each holding a copy of the text it inserted, so the undo stack
+        # alone would double memory use for as long as the dialog stays
+        # open. Off during the bulk load, back on once it's real editing.
+        self.editor.setUndoRedoEnabled(False)
 
         # Line-number/modified-dot recompute is O(n) — doing it on every
         # single 64KB chunk of a big file would add up fast, so it's
@@ -1026,14 +1040,14 @@ class FileEditorDialog(QDialog):
         except RuntimeError:
             pass
 
-    def _on_load_finished(self, data: bytes):
+    def _on_load_finished(self, total_bytes: int):
         try:
             tail = self._decoder.decode(b"", final=True)
             if tail:
                 cur = self.editor.textCursor()
                 cur.movePosition(QTextCursor.End)
                 cur.insertText(tail)
-            if len(data) >= self.MAX_EDIT_BYTES:
+            if total_bytes >= self.MAX_EDIT_BYTES:
                 cur = self.editor.textCursor()
                 cur.movePosition(QTextCursor.End)
                 cur.insertText(
@@ -1043,6 +1057,7 @@ class FileEditorDialog(QDialog):
                 )
             self._loading = False
             self._load_bar.hide()
+            self.editor.setUndoRedoEnabled(True)
             self._save_btn.setEnabled(True)
             self._save_close_btn.setEnabled(True)
             self._original = self.editor.toPlainText()
@@ -1052,15 +1067,25 @@ class FileEditorDialog(QDialog):
             self.editor.textChanged.connect(self._on_text_changed)
         except RuntimeError:
             pass
+        finally:
+            # Drop the worker/decoder now that loading is done rather than
+            # holding them (and whatever buffers paramiko still has open)
+            # alive for the rest of the dialog's lifetime.
+            self._load_worker = None
+            self._decoder     = None
 
     def _on_load_error(self, msg):
         try:
             self._loading = False
             self._load_bar.hide()
+            self.editor.setUndoRedoEnabled(True)
             self._set_status("Failed to load: {}".format(msg), T['DANGER'])
             self.editor.textChanged.connect(self._on_text_changed)
         except RuntimeError:
             pass
+        finally:
+            self._load_worker = None
+            self._decoder     = None
         QMessageBox.critical(self, "Cannot Open File", msg)
 
     # ── Find / Replace ────────────────────────────────────────
