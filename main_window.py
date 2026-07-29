@@ -29,6 +29,7 @@ from preview import PreviewPane
 from file_widgets import FileRowWidget, FileGridWidget
 from terminal_widget import TerminalWidget
 from kubernetes_tab import KubernetesTab
+from dashboard_tab import DashboardTab
 from theme_picker import ThemePicker
 
 # Extensions that can be executed remotely
@@ -358,6 +359,11 @@ class EC2FileManager(QMainWindow):
         self.k8s_tab.status_msg.connect(lambda m: self.status.showMessage(m))
         self.main_tabs.addTab(self.k8s_tab, "⎈  Kubernetes")
 
+        # ── Dashboard tab ──────────────────────────────────────
+        self.dashboard_tab = DashboardTab()
+        self.dashboard_tab.status_msg.connect(lambda m: self.status.showMessage(m))
+        self.main_tabs.addTab(self.dashboard_tab, "📊  Dashboard")
+
         # ── Status bar ────────────────────────────────────────
         self.status = QStatusBar()
         self.setStatusBar(self.status)
@@ -418,6 +424,7 @@ class EC2FileManager(QMainWindow):
         self.sidebar.refresh_theme()
         self.preview.refresh_theme()
         self.k8s_tab.apply_theme()
+        self.dashboard_tab.apply_theme()
         self._rebuild_list_header()
         self.theme_picker.refresh_theme()
 
@@ -490,6 +497,14 @@ class EC2FileManager(QMainWindow):
         self.view_grid_btn.setVisible(fm_mode)
         for sep in self._fm_seps:
             sep.setVisible(fm_mode)
+        # Dashboard only polls while it's the visible tab — this is what
+        # puts it to sleep the instant the user navigates elsewhere.
+        # Guarded: QTabWidget emits currentChanged as soon as the first tab
+        # is added (index -1 -> 0), which happens earlier in _build_ui than
+        # dashboard_tab is constructed — so this can fire before the
+        # attribute exists.
+        if hasattr(self, "dashboard_tab"):
+            self.dashboard_tab.set_active(idx == self.main_tabs.indexOf(self.dashboard_tab))
 
     # ── Connection state ──────────────────────────────────────
     def _set_connected(self, ok):
@@ -558,6 +573,7 @@ class EC2FileManager(QMainWindow):
         self._conn_password = password
         self._set_connected(True)
         self.k8s_tab.set_ssh(self.ssh)
+        self.dashboard_tab.set_ssh(self.ssh)
         # Local (client-side) connection details for the port-tunnel
         # feature, which runs `ssh` on this machine rather than over
         # the remote self.ssh session.
@@ -598,6 +614,7 @@ class EC2FileManager(QMainWindow):
         self._conn_port = 22
         self.k8s_tab.set_ssh(None)
         self.k8s_tab.clear_connection_info()
+        self.dashboard_tab.set_ssh(None)
         self.sidebar.clear_remote()
         self.file_list.clear()
         self._items = []
@@ -1315,6 +1332,7 @@ class EC2FileManager(QMainWindow):
             if self._terminal_popout_win is not None:
                 self._terminal_popout_win.close()
             self.k8s_tab.clear_connection_info()  # also stops any active tunnel
+            self.dashboard_tab.set_active(False)  # stop the dashboard's polling timer
             if self.sftp: self.sftp.close()
             if self.ssh:  self.ssh.close()
         except Exception:
