@@ -24,6 +24,7 @@ dashboard tick (piggy-backing on the same SSH round-trip the main tab
 already makes — no extra polling), rather than issuing its own SSH calls.
 """
 
+import re
 import time
 
 from PyQt5.QtWidgets import (
@@ -42,44 +43,108 @@ from utils import monospace_font
 REFRESH_MS = 6000  # live-dashboard cadence while the tab is visible
 
 # ── Combined single-round-trip shell commands ──────────────────
-_HOST_CMD = (
-    "echo __HOST__; hostname 2>&1; "
-    "echo __OS__; (grep -m1 PRETTY_NAME /etc/os-release 2>/dev/null | "
-    "cut -d= -f2 | tr -d '\"') || uname -s; "
-    "echo __KERNEL__; uname -r 2>&1; "
-    "echo __UPTIME__; (uptime -p 2>/dev/null || uptime) 2>&1; "
-    "echo __LOAD__; cat /proc/loadavg 2>/dev/null; "
-    "echo __CPU__; nproc 2>/dev/null; "
-    "grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2; "
-    "echo __MEM__; free -m 2>/dev/null | grep -i '^mem'; "
-    "echo __DISK__; df -hP -x tmpfs -x devtmpfs -x squashfs -x overlay "
-    "2>/dev/null | tail -n +2; "
-    "echo __CPUPCT__; (vmstat 1 2 2>/dev/null | tail -1) || true;"
-)
+# Both commands detect the remote OS (uname -s) and branch, since a
+# connected target may be a Linux EC2 instance OR a local/remote macOS
+# machine (the sudo_fs quick-access probes already anticipate macOS paths
+# like /Applications and /Volumes) — the Linux-only tools this used to
+# assume unconditionally (/etc/os-release, /proc/*, free, nproc) simply
+# don't exist on macOS and silently produced "Unknown"/"?" placeholders.
+_HOST_CMD = r"""
+UNAME_S=$(uname -s 2>/dev/null)
+echo __HOST__
+hostname 2>&1
+echo __OS__
+if [ "$UNAME_S" = "Darwin" ]; then
+  echo "$(sw_vers -productName 2>/dev/null) $(sw_vers -productVersion 2>/dev/null)"
+else
+  (grep -m1 PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"') || uname -s
+fi
+echo __KERNEL__
+uname -r 2>&1
+echo __UPTIME__
+(uptime -p 2>/dev/null || uptime) 2>&1
+echo __LOAD__
+if [ "$UNAME_S" = "Darwin" ]; then
+  sysctl -n vm.loadavg 2>/dev/null | tr -d '{}'
+else
+  cat /proc/loadavg 2>/dev/null
+fi
+echo __CPU__
+if [ "$UNAME_S" = "Darwin" ]; then
+  sysctl -n hw.ncpu 2>/dev/null
+  CHIP=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+  if [ -z "$CHIP" ]; then
+    CHIP=$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Chip:/{print $2; exit} /Processor Name:/{print $2; exit}')
+  fi
+  echo "$CHIP"
+else
+  nproc 2>/dev/null
+  grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2
+fi
+echo __MEM__
+if [ "$UNAME_S" = "Darwin" ]; then
+  PGSZ=$(sysctl -n hw.pagesize 2>/dev/null)
+  TOTB=$(sysctl -n hw.memsize 2>/dev/null)
+  VMS=$(vm_stat 2>/dev/null)
+  ACT=$(echo "$VMS" | awk '/Pages active/{gsub(/\./,"",$3); print $3}')
+  WIR=$(echo "$VMS" | awk '/Pages wired down/{gsub(/\./,"",$4); print $4}')
+  CMP=$(echo "$VMS" | awk '/Pages occupied by compressor/{gsub(/\./,"",$5); print $5}')
+  awk -v pg="$PGSZ" -v tot="$TOTB" -v act="${ACT:-0}" -v wir="${WIR:-0}" -v cmp="${CMP:-0}" \
+    'BEGIN { totmb = tot/1024/1024; usedmb = (act+wir+cmp)*pg/1024/1024; if (usedmb>totmb) usedmb=totmb; printf "Mem: %d %d %d 0 0 %d\n", totmb, usedmb, totmb-usedmb, totmb-usedmb }'
+else
+  free -m 2>/dev/null | grep -i '^mem'
+fi
+echo __DISK__
+if [ "$UNAME_S" = "Darwin" ]; then
+  df -hP 2>/dev/null | awk 'NR>1 && $1 !~ /^(devfs|map)/'
+else
+  df -hP -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | tail -n +2
+fi
+echo __CPUPCT__
+if [ "$UNAME_S" = "Darwin" ]; then
+  top -l 1 -n 0 2>/dev/null | grep "CPU usage"
+else
+  (vmstat 1 2 2>/dev/null | tail -1) || true
+fi
+"""
 
-_K8S_CMD = (
-    "echo __NODES__; kubectl get nodes -o wide --no-headers 2>&1; "
-    "echo __COND__; kubectl get nodes -o jsonpath="
-    "'{range .items[*]}{.metadata.name}|"
-    "{.status.conditions[?(@.type==\"Ready\")].status}|"
-    "{.status.conditions[?(@.type==\"MemoryPressure\")].status}|"
-    "{.status.conditions[?(@.type==\"DiskPressure\")].status}|"
-    "{.status.conditions[?(@.type==\"PIDPressure\")].status}"
-    "{\"\\n\"}{end}' 2>&1; "
-    "echo __TOP__; kubectl top nodes --no-headers 2>&1; "
-    # Full pod inventory via jsonpath rather than `-o wide` text parsing —
-    # newer kubectl versions render RESTARTS as "N (Ndhm ago)" with an
-    # embedded space, which silently shifts every column after it when
-    # split() on whitespace. jsonpath fields are pipe-delimited instead,
-    # so column count is never at the mercy of kubectl's display format.
-    "echo __PODS__; kubectl get pods --all-namespaces -o jsonpath="
-    "'{range .items[*]}{.metadata.namespace}|{.metadata.name}|"
-    "{.status.phase}|{.spec.nodeName}|"
-    "{range .status.containerStatuses[*]}{.restartCount}{\",\"}{end}|"
-    "{range .status.containerStatuses[*]}{.ready}{\",\"}{end}"
-    "{\"\\n\"}{end}' 2>&1; "
-    "echo __PODTOP__; kubectl top pods --all-namespaces --no-headers 2>&1;"
-)
+_K8S_CMD = r"""
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo __NODES__
+  echo "kubectl: not found"
+  echo __COND__
+  echo __TOP__
+  echo __PODS__
+  echo __PODTOP__
+else
+  echo __NODES__
+  kubectl get nodes -o wide --no-headers 2>/dev/null
+  echo __COND__
+  kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}|{.status.conditions[?(@.type=="Ready")].status}|{.status.conditions[?(@.type=="MemoryPressure")].status}|{.status.conditions[?(@.type=="DiskPressure")].status}|{.status.conditions[?(@.type=="PIDPressure")].status}{"\n"}{end}' 2>/dev/null
+  echo __TOP__
+  kubectl top nodes --no-headers 2>/dev/null
+  echo __PODS__
+  kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|{.spec.nodeName}|{range .status.containerStatuses[*]}{.restartCount}{","}{end}|{range .status.containerStatuses[*]}{.ready}{","}{end}{"\n"}{end}' 2>/dev/null
+  echo __PODTOP__
+  kubectl top pods --all-namespaces --no-headers 2>/dev/null
+fi
+"""
+# Full pod inventory (__PODS__ above) is fetched via jsonpath rather than
+# `-o wide` text parsing — newer kubectl versions render RESTARTS as
+# "N (Ndhm ago)" with an embedded space, which silently shifts every
+# column after it when split() on whitespace. jsonpath fields are
+# pipe-delimited instead, so column count is never at the mercy of
+# kubectl's display format.
+#
+# Every kubectl call above redirects stderr to /dev/null rather than
+# merging it into stdout (as this used to do with `2>&1`). When a cluster
+# is unreachable, kubectl's client-go layer writes repeated glog-style
+# warning lines to stderr (e.g. "E0729 12:40:28.372865   48153 ...:
+# dial tcp ...: connection refused") that don't reliably contain the word
+# "error" — merged into stdout, these looked exactly like extra node rows
+# and got parsed as such. Suppressing stderr means an unreachable cluster
+# now simply yields empty stdout, which the no-cluster check below already
+# treats correctly.
 
 
 def _split_sections(out: str) -> dict:
@@ -114,6 +179,30 @@ def _status_color(status: str) -> str:
     if any(x in s for x in ("error", "crash", "fail", "evict", "unknown")):
         return T["DANGER"]
     return T["TEXT_DIM"]
+
+
+# STATUS column values `kubectl get nodes` actually prints (comma-joined
+# when multiple apply, e.g. "Ready,SchedulingDisabled") — used to tell a
+# genuine node row apart from an unrelated line of the same rough shape
+# (see _looks_like_node_row).
+_NODE_STATUS_WORDS = ("ready", "notready", "unknown", "schedulingdisabled")
+
+
+def _looks_like_node_row(line: str) -> bool:
+    """True only for lines structurally matching a `kubectl get nodes -o
+    wide --no-headers` row (NAME STATUS ROLES AGE VERSION ...)."""
+    parts = line.split()
+    if len(parts) < 5:
+        return False
+    return any(w in parts[1].lower() for w in _NODE_STATUS_WORDS)
+
+
+# Shape of the CPU/MEM columns `kubectl top pods` prints, e.g. "23m" and
+# "128Mi" — used the same way as _looks_like_node_row, to validate a line
+# actually is usage data rather than unrelated stderr output that happens
+# to split into 4+ whitespace tokens.
+_CPU_VAL_RE = re.compile(r"^\d+m?$")
+_MEM_VAL_RE = re.compile(r"^\d+(Ki|Mi|Gi)?$")
 
 
 class NodeDetailWindow(QWidget):
@@ -526,26 +615,43 @@ class DashboardTab(QWidget):
         model = cpu_lines[1].strip() if len(cpu_lines) > 1 else "Unknown CPU"
         self._vm_fields["cpu_model"].setText(f"{model}  ({cores} cores)")
 
-        # CPU % busy, from `vmstat 1 2`'s last line — its final two columns
-        # (wa, st) plus 'id' (idle) are what's left after us+sy; 100-idle is
-        # simplest and matches what most monitoring tools call "CPU used".
+        # CPU % busy. Linux: from `vmstat 1 2`'s last line — its final two
+        # columns (wa, st) plus 'id' (idle) are what's left after us+sy;
+        # 100-idle is simplest and matches what most monitoring tools call
+        # "CPU used". macOS: `top -l 1 -n 0` prints a single summary line
+        # like "CPU usage: 5.26% user, 10.52% sys, 84.21% idle" instead.
         cpupct_lines = [l for l in sec.get("CPUPCT", []) if l.strip()]
         cpu_pct = None
         if cpupct_lines:
-            parts = cpupct_lines[-1].split()
-            if len(parts) >= 15:
-                try:
-                    idle = float(parts[14])
-                    cpu_pct = max(0.0, 100.0 - idle)
-                except ValueError:
-                    pass
+            last = cpupct_lines[-1]
+            if "CPU usage" in last:
+                m = re.search(r"([\d.]+)%\s*idle", last)
+                if m:
+                    try:
+                        cpu_pct = max(0.0, 100.0 - float(m.group(1)))
+                    except ValueError:
+                        pass
+            else:
+                parts = last.split()
+                if len(parts) >= 15:
+                    try:
+                        cpu_pct = max(0.0, 100.0 - float(parts[14]))
+                    except ValueError:
+                        pass
         if cpu_pct is not None:
             self._style_bar(self.cpu_bar["bar"], cpu_pct)
             self.cpu_bar["val_lbl"].setText(f"{cpu_pct:.0f}% busy")
         else:
+            # Reset the bar too, not just the label — otherwise a bar that
+            # was populated by an earlier successful refresh keeps showing
+            # that stale value forever once this stat becomes unavailable.
+            self.cpu_bar["bar"].setValue(0)
             self.cpu_bar["val_lbl"].setText("unavailable")
 
-        # Memory — `free -m` Mem row: total used free shared buff/cache available
+        # Memory — a "Mem: total used free shared buff/cache available"
+        # line, same shape whether it came from Linux `free -m` or the
+        # macOS branch of _HOST_CMD (which computes the equivalent from
+        # `sysctl hw.memsize`/`vm_stat` and prints it in the same layout).
         mem_line = first("MEM", "")
         if mem_line:
             parts = mem_line.split()
@@ -557,7 +663,11 @@ class DashboardTab(QWidget):
                     f"{used_mb/1024:.1f} / {total_mb/1024:.1f} GB"
                 )
             except (ValueError, IndexError):
+                self.mem_bar["bar"].setValue(0)
                 self.mem_bar["val_lbl"].setText("unavailable")
+        else:
+            self.mem_bar["bar"].setValue(0)
+            self.mem_bar["val_lbl"].setText("unavailable")
 
         # Disk mounts
         self.disk_tree.clear()
@@ -585,19 +695,31 @@ class DashboardTab(QWidget):
     def _on_k8s_stats(self, out: str):
         sec = _split_sections(out)
 
-        node_lines = [l for l in sec.get("NODES", []) if l.strip()]
-        joined = "\n".join(node_lines).lower()
-        no_cluster = (
-            not node_lines
-            or "not found" in joined            # kubectl missing
-            or ("error" in joined and len(node_lines) <= 2)  # kubectl present, no cluster reachable
-        )
+        raw_node_lines = [l for l in sec.get("NODES", []) if l.strip()]
+        # _K8S_CMD redirects kubectl's stderr to /dev/null rather than
+        # merging it into stdout, so a normally-behaving cluster never puts
+        # log noise here. This shape check is kept anyway as a second line
+        # of defense: some kubectl builds print retry/deprecation warnings
+        # to stdout, e.g.:
+        #   E0729 12:40:28.372865   48153 memcache.go:87] couldn't get...
+        # which has 5+ whitespace-separated tokens — the same shape as a
+        # real "NAME STATUS ROLES AGE VERSION" row — so a check that only
+        # looked at line count would treat it as a node. Validate the
+        # STATUS column instead: it's always one of a known small set of
+        # words for a real row, never true for a log line.
+        node_lines = [l for l in raw_node_lines if _looks_like_node_row(l)]
+        no_cluster = not node_lines
         if no_cluster:
             self.k8s_tree.clear()
-            self.k8s_note.setText(
-                "No Kubernetes cluster detected on this instance (kubectl unavailable "
-                "or no nodes)."
-            )
+            self._pods_by_node_cache = {}
+            for win in self._node_windows.values():
+                win.update_pods([], {})  # clear stale data rather than leave it showing
+            joined_raw = "\n".join(raw_node_lines).lower()
+            if "not found" in joined_raw or "command not found" in joined_raw:
+                msg = "No Kubernetes cluster detected on this instance (kubectl not installed)."
+            else:
+                msg = "No Kubernetes cluster detected on this instance (kubectl unavailable or no nodes)."
+            self.k8s_note.setText(msg)
             self.k8s_note.show()
             return
         self.k8s_note.hide()
@@ -651,10 +773,13 @@ class DashboardTab(QWidget):
         # (namespace, name). Missing entirely (no metrics-server) just
         # means every pod row shows "n/a" instead of a bar — same
         # graceful-degradation rule as the node-level CPU/Memory columns.
+        # Same defense-in-depth as NODES above (stderr is suppressed, but
+        # validate anyway): CPU/MEM columns are checked by shape (e.g.
+        # "23m", "128Mi") rather than just trusting any line with 4+ tokens.
         pod_usage = {}
         for line in sec.get("PODTOP", []):
             parts = line.split()
-            if len(parts) >= 4:
+            if len(parts) >= 4 and _CPU_VAL_RE.match(parts[2]) and _MEM_VAL_RE.match(parts[3]):
                 pod_usage[(parts[0], parts[1])] = {"cpu": parts[2], "mem": parts[3]}
 
         self.k8s_tree.clear()
