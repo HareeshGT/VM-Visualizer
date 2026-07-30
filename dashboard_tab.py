@@ -322,14 +322,21 @@ class NodeCard(QFrame):
     width so the row of cards always fills the section edge-to-edge.
     Hovering just highlights the card's border (see the QFrame#node_card:hover
     rule in _apply_styles) — the card doesn't move or resize.
+
+    Pass is_bucket=True for the synthetic "Unscheduled / other" tile that
+    groups pods not attributable to any real node — it renders with a
+    dashed muted border and an explanatory blurb instead of CPU/Memory
+    rings and a Ready/pressure badge, so it can't be mistaken for an
+    actual node reporting 0% usage or sitting in an unknown state.
     """
 
     doubleClicked = pyqtSignal(str)
 
-    def __init__(self, node_name: str, parent=None):
+    def __init__(self, node_name: str, parent=None, is_bucket: bool = False):
         super().__init__(parent)
         self.node_name   = node_name
         self._base_side  = 300
+        self._is_bucket  = is_bucket
         self.setObjectName("node_card")
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(self._base_side, self._base_side)
@@ -338,9 +345,10 @@ class NodeCard(QFrame):
         outer.setContentsMargins(18, 16, 18, 18)
         outer.setSpacing(14)
 
+        icon = "🕓" if is_bucket else "⎈"
         head = QHBoxLayout()
         head.setSpacing(6)
-        self.name_lbl = QLabel(f"⎈  {node_name}")
+        self.name_lbl = QLabel(f"{icon}  {node_name}")
         self.name_lbl.setWordWrap(True)
         head.addWidget(self.name_lbl, 1)
         self.status_lbl = QLabel("")
@@ -352,25 +360,50 @@ class NodeCard(QFrame):
 
         outer.addStretch(1)
 
-        rings_row = QHBoxLayout()
-        rings_row.setSpacing(32)
-        self.cpu_ring = CircularProgress(size=112, thickness=11, show_text=True, font_size=18)
-        self.mem_ring = CircularProgress(size=112, thickness=11, show_text=True, font_size=18)
+        self.cpu_ring = self.mem_ring = None
         self._ring_caps = []
-        for cap_text, ring in (("CPU", self.cpu_ring), ("Memory", self.mem_ring)):
-            col = QVBoxLayout()
-            col.setSpacing(6)
-            r_row = QHBoxLayout()
-            r_row.addStretch(1)
-            r_row.addWidget(ring)
-            r_row.addStretch(1)
-            col.addLayout(r_row)
-            cap = QLabel(cap_text)
-            cap.setAlignment(Qt.AlignHCenter)
-            col.addWidget(cap)
-            self._ring_caps.append(cap)
-            rings_row.addLayout(col)
-        outer.addLayout(rings_row)
+
+        if is_bucket:
+            # No CPU/Memory rings and no Ready/pressure badge here — those
+            # concepts don't apply to a grouping of pods rather than a
+            # host. A plain blurb makes clear this tile isn't reporting
+            # live metrics for anything, so it can't be read as a node
+            # stuck at 0% or in an unknown state.
+            self.roles_lbl.setText("Pods not tied to a specific node")
+            self.status_lbl.hide()
+
+            blurb = QLabel(
+                "Includes pending pods with no node\nassignment yet, and pods "
+                "reported\nagainst a node outside the cluster's\ncurrent node list."
+            )
+            blurb.setAlignment(Qt.AlignCenter)
+            blurb.setWordWrap(True)
+            self._blurb_lbl = blurb
+            blurb_row = QHBoxLayout()
+            blurb_row.addStretch(1)
+            blurb_row.addWidget(blurb)
+            blurb_row.addStretch(1)
+            outer.addLayout(blurb_row)
+        else:
+            rings_row = QHBoxLayout()
+            rings_row.setSpacing(32)
+            self.cpu_ring = CircularProgress(size=112, thickness=11, show_text=True, font_size=18)
+            self.mem_ring = CircularProgress(size=112, thickness=11, show_text=True, font_size=18)
+            for cap_text, ring in (("CPU", self.cpu_ring), ("Memory", self.mem_ring)):
+                col = QVBoxLayout()
+                col.setSpacing(6)
+                r_row = QHBoxLayout()
+                r_row.addStretch(1)
+                r_row.addWidget(ring)
+                r_row.addStretch(1)
+                col.addLayout(r_row)
+                cap = QLabel(cap_text)
+                cap.setAlignment(Qt.AlignHCenter)
+                col.addWidget(cap)
+                self._ring_caps.append(cap)
+                rings_row.addLayout(col)
+            outer.addLayout(rings_row)
+
         outer.addStretch(1)
 
         footer = QHBoxLayout()
@@ -379,6 +412,8 @@ class NodeCard(QFrame):
         footer.addStretch(1)
         self.pressure_lbl = QLabel("")
         self.pressure_lbl.setAlignment(Qt.AlignRight)
+        if is_bucket:
+            self.pressure_lbl.hide()
         footer.addWidget(self.pressure_lbl)
         outer.addLayout(footer)
 
@@ -394,27 +429,44 @@ class NodeCard(QFrame):
 
     # ── Styling ────────────────────────────────────────────────
     def _apply_styles(self):
-        self.setStyleSheet(
-            f"QFrame#node_card {{ background: {T['BG_ITEM']}; "
-            f"border: 1px solid {T['BORDER']}; border-radius: 14px; }} "
-            f"QFrame#node_card:hover {{ border: 1px solid {T['ACCENT']}; }}"
-        )
+        if self._is_bucket:
+            # Dashed border + muted panel background (rather than the
+            # solid border/BG_ITEM real node cards use) at rest — so the
+            # "not a real node" signal doesn't depend on hover state.
+            self.setStyleSheet(
+                f"QFrame#node_card {{ background: {T['BG_PANEL']}; "
+                f"border: 1px dashed {T['TEXT_MUTED']}; border-radius: 14px; }} "
+                f"QFrame#node_card:hover {{ border: 1px dashed {T['TEXT_DIM']}; }}"
+            )
+        else:
+            self.setStyleSheet(
+                f"QFrame#node_card {{ background: {T['BG_ITEM']}; "
+                f"border: 1px solid {T['BORDER']}; border-radius: 14px; }} "
+                f"QFrame#node_card:hover {{ border: 1px solid {T['ACCENT']}; }}"
+            )
         self.name_lbl.setStyleSheet(
-            f"color: {T['TEXT_PRIMARY']}; font-size: 15px; font-weight: 700;"
+            f"color: {T['TEXT_DIM'] if self._is_bucket else T['TEXT_PRIMARY']}; "
+            f"font-size: 15px; font-weight: 700;"
         )
         self.roles_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
         self.pods_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
         for cap in self._ring_caps:
             cap.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px; font-weight: 600;")
+        if self._is_bucket:
+            self._blurb_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
 
     def refresh_theme(self):
         self._apply_styles()
-        self.cpu_ring.refresh_theme()
-        self.mem_ring.refresh_theme()
+        if self.cpu_ring is not None:
+            self.cpu_ring.refresh_theme()
+        if self.mem_ring is not None:
+            self.mem_ring.refresh_theme()
 
     # ── Data ───────────────────────────────────────────────────
     def update_data(self, status: str, roles: str, cpu_pct, mem_pct,
                      pod_count: int, pressure_text: str, pressure_ok: bool):
+        """Update a real-node card. Not used for bucket cards — those only
+        ever show a pod count, set directly via update_pod_count()."""
         self.status_lbl.setText(status or "—")
         status_color = T["SUCCESS"] if (status or "").lower() == "ready" else T["DANGER"]
         self.status_lbl.setStyleSheet(
@@ -437,6 +489,11 @@ class NodeCard(QFrame):
             f"color: {T['SUCCESS'] if pressure_ok else T['DANGER']}; "
             f"font-size: 12px; font-weight: 600;"
         )
+
+    def update_pod_count(self, pod_count: int):
+        """Update a bucket card — the only thing it ever shows is how many
+        pods currently fall in it."""
+        self.pods_lbl.setText(f"📦  {pod_count} pod(s)")
 
     # ── Interaction ────────────────────────────────────────────
     def mouseDoubleClickEvent(self, event):
@@ -752,10 +809,10 @@ class DashboardTab(QWidget):
         for card in self._node_cards.values():
             card.set_side(side)
 
-    def _add_node_card(self, node_name: str) -> NodeCard:
+    def _add_node_card(self, node_name: str, is_bucket: bool = False) -> NodeCard:
         """Create a NodeCard for *node_name*, place it at the next free
         grid slot (3 cards per row), size it to fill the row, and track it."""
-        card = NodeCard(node_name)
+        card = NodeCard(node_name, is_bucket=is_bucket)
         card.set_side(self._current_card_side())
         card.doubleClicked.connect(self._on_node_double_clicked)
         idx = len(self._node_cards)
@@ -1047,11 +1104,13 @@ class DashboardTab(QWidget):
         # wasn't in the NODES list or is the synthetic "(unscheduled)"
         # bucket — surface it as its own card (double-clickable, same as
         # any other node) rather than silently dropping those pods.
+        # Rendered as a bucket card (see NodeCard) rather than update_data(),
+        # so it can't be mistaken for a real node reporting 0% usage.
         for node_name, node_pods in pods_by_node.items():
-            label = "🕓  Unscheduled / other" if node_name == "(unscheduled)" else node_name
+            label = "Unscheduled / other" if node_name == "(unscheduled)" else node_name
             self._pods_by_node_cache[label] = node_pods
-            card = self._add_node_card(label)
-            card.update_data("", "", None, None, len(node_pods), "", True)
+            card = self._add_node_card(label, is_bucket=True)
+            card.update_pod_count(len(node_pods))
 
         # Push fresh data into any node detail windows that are still open,
         # instead of leaving them showing a stale snapshot until re-clicked.
