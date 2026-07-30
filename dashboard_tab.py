@@ -30,9 +30,10 @@ import time
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem,
-    QSizePolicy,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import (
+    Qt, QTimer, pyqtSignal,
+)
 from PyQt5.QtGui import QColor
 
 from themes import T
@@ -310,6 +311,151 @@ class NodeDetailWindow(QWidget):
         super().closeEvent(event)
 
 
+class NodeCard(QFrame):
+    """A single node's summary shown as a square card tile in the
+    Kubernetes nodes grid (3 cards per row — see DashboardTab._add_node_
+    card). Replaces the old one-row-per-node table; double-clicking a card
+    opens the same NodeDetailWindow with the pods scheduled on it.
+
+    The card's normal size is driven by set_side(), which the owning
+    DashboardTab calls with a side length computed from the available grid
+    width so the row of cards always fills the section edge-to-edge.
+    Hovering just highlights the card's border (see the QFrame#node_card:hover
+    rule in _apply_styles) — the card doesn't move or resize.
+    """
+
+    doubleClicked = pyqtSignal(str)
+
+    def __init__(self, node_name: str, parent=None):
+        super().__init__(parent)
+        self.node_name   = node_name
+        self._base_side  = 300
+        self.setObjectName("node_card")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(self._base_side, self._base_side)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 18)
+        outer.setSpacing(14)
+
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.name_lbl = QLabel(f"⎈  {node_name}")
+        self.name_lbl.setWordWrap(True)
+        head.addWidget(self.name_lbl, 1)
+        self.status_lbl = QLabel("")
+        head.addWidget(self.status_lbl, 0, Qt.AlignTop)
+        outer.addLayout(head)
+
+        self.roles_lbl = QLabel("")
+        outer.addWidget(self.roles_lbl)
+
+        outer.addStretch(1)
+
+        rings_row = QHBoxLayout()
+        rings_row.setSpacing(32)
+        self.cpu_ring = CircularProgress(size=112, thickness=11, show_text=True, font_size=18)
+        self.mem_ring = CircularProgress(size=112, thickness=11, show_text=True, font_size=18)
+        self._ring_caps = []
+        for cap_text, ring in (("CPU", self.cpu_ring), ("Memory", self.mem_ring)):
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            r_row = QHBoxLayout()
+            r_row.addStretch(1)
+            r_row.addWidget(ring)
+            r_row.addStretch(1)
+            col.addLayout(r_row)
+            cap = QLabel(cap_text)
+            cap.setAlignment(Qt.AlignHCenter)
+            col.addWidget(cap)
+            self._ring_caps.append(cap)
+            rings_row.addLayout(col)
+        outer.addLayout(rings_row)
+        outer.addStretch(1)
+
+        footer = QHBoxLayout()
+        self.pods_lbl = QLabel("")
+        footer.addWidget(self.pods_lbl)
+        footer.addStretch(1)
+        self.pressure_lbl = QLabel("")
+        self.pressure_lbl.setAlignment(Qt.AlignRight)
+        footer.addWidget(self.pressure_lbl)
+        outer.addLayout(footer)
+
+        self._apply_styles()
+
+    # ── Sizing ─────────────────────────────────────────────────
+    def set_side(self, side: int):
+        """Set the card's square side length. Called by DashboardTab
+        whenever the grid's available width changes, so the row of cards
+        keeps filling the section."""
+        self._base_side = side
+        self.setFixedSize(side, side)
+
+    # ── Styling ────────────────────────────────────────────────
+    def _apply_styles(self):
+        self.setStyleSheet(
+            f"QFrame#node_card {{ background: {T['BG_ITEM']}; "
+            f"border: 1px solid {T['BORDER']}; border-radius: 14px; }} "
+            f"QFrame#node_card:hover {{ border: 1px solid {T['ACCENT']}; }}"
+        )
+        self.name_lbl.setStyleSheet(
+            f"color: {T['TEXT_PRIMARY']}; font-size: 15px; font-weight: 700;"
+        )
+        self.roles_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.pods_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        for cap in self._ring_caps:
+            cap.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px; font-weight: 600;")
+
+    def refresh_theme(self):
+        self._apply_styles()
+        self.cpu_ring.refresh_theme()
+        self.mem_ring.refresh_theme()
+
+    # ── Data ───────────────────────────────────────────────────
+    def update_data(self, status: str, roles: str, cpu_pct, mem_pct,
+                     pod_count: int, pressure_text: str, pressure_ok: bool):
+        self.status_lbl.setText(status or "—")
+        status_color = T["SUCCESS"] if (status or "").lower() == "ready" else T["DANGER"]
+        self.status_lbl.setStyleSheet(
+            f"color: {status_color}; font-size: 12px; font-weight: 700;"
+        )
+        self.roles_lbl.setText(roles or "—")
+
+        if cpu_pct is not None:
+            self.cpu_ring.setValue(cpu_pct, _pct_color(cpu_pct))
+        else:
+            self.cpu_ring.setValue(0)
+        if mem_pct is not None:
+            self.mem_ring.setValue(mem_pct, _pct_color(mem_pct))
+        else:
+            self.mem_ring.setValue(0)
+
+        self.pods_lbl.setText(f"📦  {pod_count} pod(s)")
+        self.pressure_lbl.setText(pressure_text or "")
+        self.pressure_lbl.setStyleSheet(
+            f"color: {T['SUCCESS'] if pressure_ok else T['DANGER']}; "
+            f"font-size: 12px; font-weight: 600;"
+        )
+
+    # ── Interaction ────────────────────────────────────────────
+    def mouseDoubleClickEvent(self, event):
+        self.doubleClicked.emit(self.node_name)
+        super().mouseDoubleClickEvent(event)
+
+
+class _NodeGridContainer(QWidget):
+    """Plain container for the node-card QGridLayout that emits resized()
+    on every size change, so DashboardTab can rescale cards to keep
+    filling the available width (see DashboardTab._rescale_node_cards)."""
+
+    resized = pyqtSignal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
+
+
 class DashboardTab(QWidget):
     status_msg = pyqtSignal(str)
 
@@ -329,6 +475,11 @@ class DashboardTab(QWidget):
         # Open NodeDetailWindow instances, keyed the same way, so an
         # already-open window is refreshed in place instead of duplicated.
         self._node_windows = {}
+
+        # NodeCard tiles currently placed in the Kubernetes nodes grid,
+        # keyed by node name. Rebuilt from scratch on every refresh (same
+        # clear-then-repopulate approach the old table used).
+        self._node_cards = {}
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -363,9 +514,10 @@ class DashboardTab(QWidget):
 
     def apply_theme(self):
         self._apply_styles()
-        self._style_tree(self.k8s_tree)
         self.cpu_ring["ring"].refresh_theme()
         self.mem_ring["ring"].refresh_theme()
+        for card in self._node_cards.values():
+            card.refresh_theme()
         for win in self._node_windows.values():
             win.refresh_theme()
 
@@ -485,21 +637,29 @@ class DashboardTab(QWidget):
         self.k8s_note.hide()
         self.k8s_card["body"].addWidget(self.k8s_note)
 
-        self.k8s_hint = QLabel("Double-click a node to see the pods running on it.")
+        self.k8s_hint = QLabel("Double-click a node card to see the pods running on it.")
         self.k8s_hint.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
         self.k8s_card["body"].addWidget(self.k8s_hint)
 
-        self.k8s_tree = QTreeWidget()
-        self.k8s_tree.setHeaderLabels(
-            ["Node", "Status", "Roles", "CPU", "Memory", "Pods", "Pressure"]
-        )
-        self.k8s_tree.setRootIsDecorated(False)  # no expand arrows — nodes only, no children
-        self.k8s_tree.setUniformRowHeights(True)
-        self.k8s_tree.setMinimumHeight(160)
-        self.k8s_tree.setCursor(Qt.PointingHandCursor)
-        self.k8s_tree.itemDoubleClicked.connect(self._on_node_double_clicked)
-        self._style_tree(self.k8s_tree)
-        self.k8s_card["body"].addWidget(self.k8s_tree)
+        # Node summaries as cards, 3 per row, instead of a one-row-per-node
+        # table. self.k8s_grid is repopulated from scratch on every refresh
+        # (see _clear_node_grid / _add_node_card). The container is a
+        # resize-aware widget so the row of cards keeps filling the full
+        # section width as the window is resized (see _rescale_node_cards).
+        self.k8s_grid_container = _NodeGridContainer()
+        self.k8s_grid = QGridLayout(self.k8s_grid_container)
+        self.k8s_grid.setContentsMargins(0, 0, 0, 0)
+        self.k8s_grid.setHorizontalSpacing(16)
+        self.k8s_grid.setVerticalSpacing(16)
+        # Cards are square and fixed-size at any given moment, so the card
+        # columns shouldn't stretch themselves (that would space cards
+        # unevenly). Cards live in columns 1..NODE_GRID_COLS; column 0 and
+        # the trailing column split any leftover width evenly between
+        # them, which centres the row instead of pinning it to the left.
+        self.k8s_grid.setColumnStretch(0, 1)
+        self.k8s_grid.setColumnStretch(self.NODE_GRID_COLS + 1, 1)
+        self.k8s_grid_container.resized.connect(self._rescale_node_cards)
+        self.k8s_card["body"].addWidget(self.k8s_grid_container)
         self._content_layout.addWidget(self.k8s_card["frame"])
 
         self._content_layout.addStretch()
@@ -557,6 +717,52 @@ class DashboardTab(QWidget):
 
     def _style_ring(self, ring: CircularProgress, pct: float):
         ring.setValue(pct, _pct_color(pct))
+
+    # ── Node card grid ─────────────────────────────────────────
+    NODE_GRID_COLS     = 3
+    NODE_CARD_MIN_SIDE = 300   # never shrink cards smaller than this (rings need room)
+    NODE_CARD_MAX_SIDE = 420   # cap growth on very wide windows
+
+    def _clear_node_grid(self):
+        """Remove and delete every card currently in the grid, ready for a
+        fresh set to be added via _add_node_card()."""
+        while self.k8s_grid.count():
+            item = self.k8s_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._node_cards = {}
+
+    def _current_card_side(self) -> int:
+        """Square side length that makes NODE_GRID_COLS cards, plus the
+        gaps between them, exactly fill the grid container's width —
+        clamped so cards never get uncomfortably tiny or huge."""
+        width = self.k8s_grid_container.width()
+        if width <= 0:
+            return self.NODE_CARD_MIN_SIDE
+        spacing = self.k8s_grid.horizontalSpacing()
+        side = (width - spacing * (self.NODE_GRID_COLS - 1)) / self.NODE_GRID_COLS
+        return int(max(self.NODE_CARD_MIN_SIDE, min(self.NODE_CARD_MAX_SIDE, side)))
+
+    def _rescale_node_cards(self):
+        """Re-apply the current fill-width side length to every card in
+        the grid. Connected to the container's resized signal so the row
+        keeps filling the section as the window is resized."""
+        side = self._current_card_side()
+        for card in self._node_cards.values():
+            card.set_side(side)
+
+    def _add_node_card(self, node_name: str) -> NodeCard:
+        """Create a NodeCard for *node_name*, place it at the next free
+        grid slot (3 cards per row), size it to fill the row, and track it."""
+        card = NodeCard(node_name)
+        card.set_side(self._current_card_side())
+        card.doubleClicked.connect(self._on_node_double_clicked)
+        idx = len(self._node_cards)
+        row, col = divmod(idx, self.NODE_GRID_COLS)
+        self.k8s_grid.addWidget(card, row, col + 1)
+        self._node_cards[node_name] = card
+        return card
 
     def _apply_styles(self):
         self.ctrl_bar.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
@@ -730,7 +936,7 @@ class DashboardTab(QWidget):
         node_lines = [l for l in raw_node_lines if _looks_like_node_row(l)]
         no_cluster = not node_lines
         if no_cluster:
-            self.k8s_tree.clear()
+            self._clear_node_grid()
             self._pods_by_node_cache = {}
             for win in self._node_windows.values():
                 win.update_pods([], {})  # clear stale data rather than leave it showing
@@ -802,9 +1008,11 @@ class DashboardTab(QWidget):
             if len(parts) >= 4 and _CPU_VAL_RE.match(parts[2]) and _MEM_VAL_RE.match(parts[3]):
                 pod_usage[(parts[0], parts[1])] = {"cpu": parts[2], "mem": parts[3]}
 
-        self.k8s_tree.clear()
+        self._clear_node_grid()
         self._pods_by_node_cache = {}
         self._pod_usage_cache    = pod_usage
+
+        _pressure_names = {"mem": "MemoryPressure", "disk": "DiskPressure", "pid": "PIDPressure"}
 
         for line in node_lines:
             parts = line.split()
@@ -814,62 +1022,36 @@ class DashboardTab(QWidget):
             node_pods = pods_by_node.pop(name, [])
             self._pods_by_node_cache[name] = node_pods
 
-            item = QTreeWidgetItem([name, status, roles, "", "", str(len(node_pods)), ""])
-            item.setForeground(1, QColor(T["SUCCESS"] if status.lower() == "ready" else T["DANGER"]))
-
             c = cond.get(name, {})
-            _pressure_names = {"mem": "MemoryPressure", "disk": "DiskPressure", "pid": "PIDPressure"}
             pressures = [label for key, label in _pressure_names.items() if c.get(key) == "True"]
-            if pressures:
-                item.setText(6, ", ".join(pressures))
-                item.setForeground(6, QColor(T["DANGER"]))
-            else:
-                item.setText(6, "OK")
-                item.setForeground(6, QColor(T["SUCCESS"]))
-
-            self.k8s_tree.addTopLevelItem(item)
+            pressure_text = ", ".join(pressures) if pressures else "OK"
+            pressure_ok   = not pressures
 
             t = top.get(name)
-            for col, key in ((3, "cpu_pct"), (4, "mem_pct")):
-                if t is not None:
-                    try:
-                        pct = float(t[key])
-                        # A mini ring in place of the old QProgressBar — a
-                        # narrow table column has little width to spare, and
-                        # a ring reads its percentage without needing one.
-                        ring = CircularProgress(
-                            size=26, thickness=4, show_text=True,
-                            font_size=6, suffix="",
-                        )
-                        self._style_ring(ring, pct)
-                        ring.setToolTip(f"{pct:.0f}%")
-                        holder = QWidget()
-                        hl = QHBoxLayout(holder)
-                        hl.setContentsMargins(0, 0, 0, 0)
-                        hl.addWidget(ring)
-                        hl.setAlignment(Qt.AlignCenter)
-                        self.k8s_tree.setItemWidget(item, col, holder)
-                        continue
-                    except ValueError:
-                        pass
-                item.setText(col, "n/a")
-                item.setForeground(col, QColor(T["TEXT_MUTED"]))
+            cpu_pct = mem_pct = None
+            if t is not None:
+                try:
+                    cpu_pct = float(t["cpu_pct"])
+                except ValueError:
+                    cpu_pct = None
+                try:
+                    mem_pct = float(t["mem_pct"])
+                except ValueError:
+                    mem_pct = None
+
+            card = self._add_node_card(name)
+            card.update_data(status, roles, cpu_pct, mem_pct,
+                              len(node_pods), pressure_text, pressure_ok)
 
         # Anything left in pods_by_node belongs to a node that either
         # wasn't in the NODES list or is the synthetic "(unscheduled)"
-        # bucket — surface it as its own row (double-clickable, same as
+        # bucket — surface it as its own card (double-clickable, same as
         # any other node) rather than silently dropping those pods.
         for node_name, node_pods in pods_by_node.items():
             label = "🕓  Unscheduled / other" if node_name == "(unscheduled)" else node_name
             self._pods_by_node_cache[label] = node_pods
-            item = QTreeWidgetItem([label, "", "", "", "", str(len(node_pods)), ""])
-            item.setForeground(0, QColor(T["TEXT_MUTED"]))
-            for col in (1, 2, 3, 4, 6):
-                item.setText(col, "n/a" if col in (3, 4) else "")
-            self.k8s_tree.addTopLevelItem(item)
-
-        for col in range(7):
-            self.k8s_tree.resizeColumnToContents(col)
+            card = self._add_node_card(label)
+            card.update_data("", "", None, None, len(node_pods), "", True)
 
         # Push fresh data into any node detail windows that are still open,
         # instead of leaving them showing a stale snapshot until re-clicked.
@@ -880,8 +1062,7 @@ class DashboardTab(QWidget):
         self.status_msg.emit("Dashboard updated")
 
     # ── Node detail window ──────────────────────────────────────
-    def _on_node_double_clicked(self, item: QTreeWidgetItem, _column: int):
-        node_name = item.text(0)
+    def _on_node_double_clicked(self, node_name: str):
         pods = self._pods_by_node_cache.get(node_name, [])
 
         win = self._node_windows.get(node_name)
@@ -900,6 +1081,6 @@ class DashboardTab(QWidget):
 
     def _on_k8s_error(self, err: str):
         self._busy = False
-        self.k8s_tree.clear()
+        self._clear_node_grid()
         self.k8s_note.setText(f"Kubernetes data unavailable: {err}")
         self.k8s_note.show()
