@@ -365,6 +365,9 @@ class EC2FileManager(QMainWindow):
         self.dashboard_tab.status_msg.connect(lambda m: self.status.showMessage(m))
         self.main_tabs.addTab(self.dashboard_tab, "📊  Dashboard")
 
+        # Land on the Dashboard tab by default rather than File Manager.
+        self.main_tabs.setCurrentWidget(self.dashboard_tab)
+
         # ── Status bar ────────────────────────────────────────
         self.status = QStatusBar()
         self.setStatusBar(self.status)
