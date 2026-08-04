@@ -38,7 +38,7 @@ from PyQt5.QtGui import QColor
 
 from themes import T
 from workers import CommandWorker, track_worker
-from utils import monospace_font
+from utils import monospace_font, size_fmt
 from progress_ring import CircularProgress
 
 
@@ -162,6 +162,27 @@ def _split_sections(out: str) -> dict:
         if current is not None:
             sections[current].append(line)
     return sections
+
+
+# `df -hP` prints sizes as human-readable strings ("20G", "512M", "1.0T",
+# "830K", or a bare byte count with no suffix) — this converts one back to
+# a raw byte count so per-mount sizes can be summed into an overall
+# storage total/used figure for the dashboard's storage ring. Returns
+# None for anything that doesn't match (e.g. "-", seen for some pseudo
+# filesystems), so callers can skip those rows rather than mis-count them.
+_DF_SIZE_RE = re.compile(r"^([\d.]+)([KMGTP]?)i?$")
+_DF_SIZE_MULT = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3,
+                  "T": 1024**4, "P": 1024**5}
+
+
+def _parse_df_size(s: str):
+    m = _DF_SIZE_RE.match((s or "").strip())
+    if not m:
+        return None
+    try:
+        return float(m.group(1)) * _DF_SIZE_MULT[m.group(2)]
+    except (ValueError, KeyError):
+        return None
 
 
 def _pct_color(pct: float) -> str:
@@ -573,6 +594,7 @@ class DashboardTab(QWidget):
         self._apply_styles()
         self.cpu_ring["ring"].refresh_theme()
         self.mem_ring["ring"].refresh_theme()
+        self.storage_ring["ring"].refresh_theme()
         for card in self._node_cards.values():
             card.refresh_theme()
         for win in self._node_windows.values():
@@ -639,6 +661,8 @@ class DashboardTab(QWidget):
         rings_row.addLayout(self.cpu_ring["layout"])
         self.mem_ring = self._labeled_ring("Memory usage")
         rings_row.addLayout(self.mem_ring["layout"])
+        self.storage_ring = self._labeled_ring("Storage usage")
+        rings_row.addLayout(self.storage_ring["layout"])
         top_row.addLayout(rings_row)
 
         divider = QFrame()
@@ -952,8 +976,12 @@ class DashboardTab(QWidget):
             self.mem_ring["ring"].setValue(0)
             self.mem_ring["val_lbl"].setText("unavailable")
 
-        # Disk mounts
+        # Disk mounts — also accumulated into an overall storage total/used
+        # (in bytes, parsed back out of df's human-readable Size/Used
+        # columns) so the storage ring reflects everything in the table
+        # below it rather than just one arbitrarily-chosen mount.
         self.disk_tree.clear()
+        total_bytes = used_bytes = 0.0
         for line in sec.get("DISK", []):
             parts = line.split(None, 5)
             if len(parts) < 6:
@@ -966,6 +994,21 @@ class DashboardTab(QWidget):
             except ValueError:
                 pass
             self.disk_tree.addTopLevelItem(item)
+
+            size_b, used_b = _parse_df_size(size), _parse_df_size(used)
+            if size_b is not None and used_b is not None:
+                total_bytes += size_b
+                used_bytes  += used_b
+
+        if total_bytes > 0:
+            storage_pct = min(100.0, used_bytes / total_bytes * 100.0)
+            self._style_ring(self.storage_ring["ring"], storage_pct)
+            self.storage_ring["val_lbl"].setText(
+                f"{size_fmt(used_bytes)} / {size_fmt(total_bytes)}"
+            )
+        else:
+            self.storage_ring["ring"].setValue(0)
+            self.storage_ring["val_lbl"].setText("unavailable")
 
         self._mark_updated()
         self.status_msg.emit("Dashboard updated")
