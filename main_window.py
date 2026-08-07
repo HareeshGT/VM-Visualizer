@@ -15,7 +15,10 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QProgressBar, QTabWidget, QComboBox,
     QApplication, QShortcut, QGraphicsOpacityEffect,
 )
-from PyQt5.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import (
+    Qt, QSize, QPropertyAnimation, QEasingCurve, QRect, QPoint,
+    QParallelAnimationGroup,
+)
 from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
 
 import themes as _themes
@@ -98,10 +101,25 @@ class EC2FileManager(QMainWindow):
         self._workers      = []
         self._cwd_workers  = []
 
+        # Tab-switch slide animation state — see _animate_tab_slide().
+        self._tab_anim_group    = None
+        self._tab_anim_overlays = []
+        self._current_tab_widget = None
+        self._current_tab_idx    = -1
+        self._tab_slide_ready    = False
+
         self.setWindowTitle("EC2 Manager")
         self.resize(1260, 740)
         apply_qss_to(self)
         self._build_ui()
+        # _build_ui() adds tabs one at a time, which fires currentChanged
+        # (main_tabs) synthetically several times (-1→0→…) before there's
+        # anything meaningful to slide between. Only start animating after
+        # the tab set has settled, and seed the "current" tracking from
+        # wherever _build_ui() landed (the Dashboard tab).
+        self._current_tab_widget = self.main_tabs.currentWidget()
+        self._current_tab_idx    = self.main_tabs.currentIndex()
+        self._tab_slide_ready    = True
         self._set_connected(False)
         self.terminal.show_prompt("(not connected)$ ")
 
@@ -540,6 +558,15 @@ class EC2FileManager(QMainWindow):
 
     # ── Tab visibility ────────────────────────────────────────
     def _on_main_tab_change(self, idx):
+        new_widget = self.main_tabs.widget(idx)
+        if (self._tab_slide_ready and new_widget is not None
+                and self._current_tab_widget is not None
+                and new_widget is not self._current_tab_widget):
+            direction = 1 if idx > self._current_tab_idx else -1
+            self._animate_tab_slide(self._current_tab_widget, new_widget, direction)
+        self._current_tab_widget = new_widget
+        self._current_tab_idx    = idx
+
         fm_mode = (idx == 0)
         for b in [self.act_back, self.act_forward, self.act_up, self.act_refresh]:
             b.setVisible(fm_mode)
@@ -560,6 +587,69 @@ class EC2FileManager(QMainWindow):
         # attribute exists.
         if hasattr(self, "dashboard_tab"):
             self.dashboard_tab.set_active(idx == self.main_tabs.indexOf(self.dashboard_tab))
+
+    # ── Tab-switch slide animation ──────────────────────────────
+    # QTabWidget just hard-cuts between pages. To get a real slide, two
+    # QLabel "snapshots" (grab()bed pixmaps of the outgoing and incoming
+    # tab pages) are laid over the real QStackedWidget and animated across
+    # — the actual page swap already happened instantly underneath, the
+    # overlay just hides that cut while it plays out, then removes itself.
+    def _animate_tab_slide(self, old_widget, new_widget, direction):
+        # A rapid second tab click while one slide is still playing:
+        # finish/clean up the first instead of stacking overlays.
+        self._finish_tab_slide()
+
+        tab_bar = self.main_tabs.tabBar()
+        tab_bar_h = tab_bar.height() if tab_bar else 0
+        rect = QRect(0, tab_bar_h, self.main_tabs.width(),
+                     max(0, self.main_tabs.height() - tab_bar_h))
+        if rect.width() <= 0 or rect.height() <= 0:
+            return  # window not laid out yet (e.g. still hidden) — nothing to animate
+
+        old_pix = old_widget.grab()
+        new_pix = new_widget.grab()
+        if old_pix.isNull() or new_pix.isNull():
+            return
+
+        offset = QPoint(rect.width() * direction, 0)
+
+        lbl_old = QLabel(self.main_tabs)
+        lbl_old.setPixmap(old_pix)
+        lbl_old.setGeometry(rect)
+        lbl_old.show()
+        lbl_old.raise_()
+
+        lbl_new = QLabel(self.main_tabs)
+        lbl_new.setPixmap(new_pix)
+        lbl_new.setGeometry(rect.translated(offset))
+        lbl_new.show()
+        lbl_new.raise_()
+
+        self._tab_anim_overlays = [lbl_old, lbl_new]
+
+        group = QParallelAnimationGroup(self)
+        for lbl, start_rect, end_rect in (
+            (lbl_old, rect, rect.translated(-offset.x(), -offset.y())),
+            (lbl_new, rect.translated(offset), rect),
+        ):
+            anim = QPropertyAnimation(lbl, b"geometry", self)
+            anim.setDuration(240)
+            anim.setStartValue(start_rect)
+            anim.setEndValue(end_rect)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            group.addAnimation(anim)
+
+        group.finished.connect(self._finish_tab_slide)
+        self._tab_anim_group = group
+        group.start()
+
+    def _finish_tab_slide(self):
+        if self._tab_anim_group is not None:
+            self._tab_anim_group.stop()
+            self._tab_anim_group = None
+        for lbl in self._tab_anim_overlays:
+            lbl.deleteLater()
+        self._tab_anim_overlays = []
 
     # ── Connection state ──────────────────────────────────────
     def _set_connected(self, ok):

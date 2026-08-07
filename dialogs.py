@@ -2676,9 +2676,13 @@ class ManageTunnelServicesDialog(QDialog):
 
     def _on_form_save(self, data: dict, editing):
         others = [s for s in self._services if s is not editing]
-        if any(s["name"] == data["name"] and s["port"] == data["port"] for s in others):
-            self.form_panel.show_error(f"A service named “{data['name']}” already exists.")
+
+        # Check for an identical service (all fields match)
+        if any(s == data for s in others):
+            self.form_panel.show_error("This service is already present.")
             return
+
+        # Check for duplicate local port
         if any(s["port"] == data["port"] for s in others):
             self.form_panel.show_error(
                 f"Local port {data['port']} is already used by another service."
@@ -2687,11 +2691,15 @@ class ManageTunnelServicesDialog(QDialog):
 
         if editing is None:
             self._services.append(data)
-            self.status_lbl.setText(f"Added “{data['name']}” — click Save to VM to apply.")
+            self.status_lbl.setText(
+                f"Added “{data['name']}” — click Save to VM to apply."
+            )
         else:
             idx = self._services.index(editing)
             self._services[idx] = data
-            self.status_lbl.setText(f"Updated “{data['name']}” — click Save to VM to apply.")
+            self.status_lbl.setText(
+                f"Updated “{data['name']}” — click Save to VM to apply."
+            )
 
         self._dirty = True
         self._rebuild_cards()
@@ -2733,13 +2741,29 @@ class ManageTunnelServicesDialog(QDialog):
 
         csv_text = self._services_to_csv(self._services)
         b64 = base64.b64encode(csv_text.encode("utf-8")).decode("ascii")
-        # base64-encode the payload and decode it VM-side rather than
-        # embedding raw CSV in the shell command — sidesteps any quoting
-        # issues from service/namespace names containing shell-special
-        # characters, matching the approach SudoFS.put() takes elsewhere.
-        remote_dir = os.path.dirname(self.csv_path) or "."
+
+        # csv_path (REMOTE_TUNNEL_CSV_PATH) starts with '~' by default. Shell
+        # tilde-expansion only happens on an *unquoted* leading '~' — once
+        # shlex.quote() wraps the path in single quotes (needed so
+        # service/namespace text can't break out of the command), '~' is no
+        # longer expanded and bash creates/writes a literal directory named
+        # "~" inside the SSH session's cwd instead of $HOME. That silently
+        # succeeded (no error), so the dialog reported "Saved" while the
+        # real ~/.tunnel/tunnel_services.csv (the file load_tunnel_services
+        # reads, unquoted, so it *does* expand '~') was never touched —
+        # every newly added service looked like it hadn't been saved.
+        # Fix: resolve '~' to the actual remote $HOME first, then quote the
+        # already-expanded absolute path.
+        csv_path = self.csv_path
+        if csv_path.startswith("~"):
+            _, _home_out, _ = self.ssh.exec_command("echo $HOME")
+            home = _home_out.read().decode(errors="replace").strip()
+            if home:
+                csv_path = home + csv_path[1:]
+
+        remote_dir = os.path.dirname(csv_path) or "."
         cmd = "mkdir -p {d} 2>/dev/null; echo {b64} | base64 -d > {p}".format(
-            d=shlex.quote(remote_dir), b64=shlex.quote(b64), p=shlex.quote(self.csv_path),
+            d=shlex.quote(remote_dir), b64=shlex.quote(b64), p=shlex.quote(csv_path),
         )
 
         self.save_all_btn.setEnabled(False)
