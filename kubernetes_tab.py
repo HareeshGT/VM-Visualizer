@@ -18,7 +18,7 @@ from PyQt5.QtGui import QColor, QFont, QFontDatabase
 
 from themes import T, apply_qss_to
 from workers import CommandWorker, track_worker
-from dialogs import LogViewerDialog, ExecDialog
+from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog
 from utils import (
     append_terminal_html, append_terminal_text,
     load_tunnel_services, REMOTE_TUNNEL_CSV_PATH,
@@ -487,6 +487,14 @@ class KubernetesTab(QWidget):
         reload_btn = self._toolbar_btn("↺  Reload CSV")
         reload_btn.clicked.connect(self._load_tunnel_csv)
         tb.addWidget(reload_btn)
+
+        manage_btn = self._toolbar_btn(
+            "⚙️  Manage Services",
+            object_name="primary",
+            tooltip="Add, edit, or remove tunnel services stored on the connected VM",
+        )
+        manage_btn.clicked.connect(self._open_manage_tunnel_services)
+        tb.addWidget(manage_btn)
 
         refresh_status_btn = self._toolbar_btn(
             "🔄  Refresh Status",
@@ -1186,6 +1194,23 @@ class KubernetesTab(QWidget):
             f" : {svc['container_port']}"
             f" → {svc['port']}"
         )
+
+    def _open_manage_tunnel_services(self):
+        """Open the card-based dialog for adding/editing/removing tunnel
+        services on the connected VM's CSV. Reloads the checklist from the
+        VM afterwards so it reflects whatever was actually saved (rather
+        than just trusting the dialog's in-memory copy)."""
+        if not self.ssh:
+            QMessageBox.information(
+                self, "Not connected",
+                "Connect to a VM first to manage its tunnel services."
+            )
+            return
+        dlg = ManageTunnelServicesDialog(
+            self.ssh, self._tunnel_services, REMOTE_TUNNEL_CSV_PATH, parent=self
+        )
+        dlg.services_saved.connect(lambda _: self._load_tunnel_csv())
+        dlg.exec_()
 
     def _load_tunnel_csv(self):
         """Load tunnel services from the currently connected VM."""
