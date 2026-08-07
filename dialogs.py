@@ -2676,7 +2676,7 @@ class ManageTunnelServicesDialog(QDialog):
 
     def _on_form_save(self, data: dict, editing):
         others = [s for s in self._services if s is not editing]
-        if any(s["name"] == data["name"] for s in others):
+        if any(s["name"] == data["name"] and s["port"] == data["port"] for s in others):
             self.form_panel.show_error(f"A service named “{data['name']}” already exists.")
             return
         if any(s["port"] == data["port"] for s in others):
