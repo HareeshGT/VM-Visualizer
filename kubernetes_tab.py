@@ -1,6 +1,7 @@
 """kubernetes_tab.py — The Kubernetes management tab widget."""
 
 import json
+import re
 import shlex
 
 
@@ -219,10 +220,12 @@ class KubernetesTab(QWidget):
         self.pod_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.pod_tree.customContextMenuRequested.connect(self._pod_ctx_menu)
         self.pod_tree.itemDoubleClicked.connect(self._on_pod_double_click)
-        self.pod_tree.setColumnCount(8)
-        self.pod_tree.setHeaderLabels(["Namespace", "Name", "Ready", "Status", "Restarts", "Age", "IP", "Node"])
+        self.pod_tree.setColumnCount(9)
+        self.pod_tree.setHeaderLabels(
+            ["Namespace", "Name", "Ready", "Status", "Restarts", "Last Restart", "Age", "IP", "Node"]
+        )
         hdr = self.pod_tree.header()
-        for i in range(8):
+        for i in range(9):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.Stretch)   # Name gets the extra room
         # Namespace column is only meaningful in "(all namespaces)" view — when a
@@ -773,6 +776,42 @@ class KubernetesTab(QWidget):
         elif idx == 4: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
+    # `kubectl get pods -o wide` renders the RESTARTS column as a plain
+    # number ("0") normally, but as "N (Ndhm ago)" — a single logical
+    # value containing a space — for any pod whose last restart was
+    # recent enough for kubectl to bother annotating it. line.split()
+    # blows that annotation into two extra whitespace-separated tokens
+    # ("(22d", "ago)"), which silently shifts every fixed-position column
+    # after it (AGE/IP/NODE) by two — the misalignment seen when a
+    # recently-restarted pod's IP/Node show up empty or wrong while an
+    # untouched pod in the same table lines up fine. _split_pod_line
+    # detects that two-token annotation before the fixed-offset slicing
+    # below runs, pulls it out into its own "Last Restart" value (rather
+    # than just discarding it — it's genuinely useful info), and returns
+    # the remaining tokens so the real columns land back in place.
+    _PAREN_OPEN_RE  = re.compile(r"^\(\S*$")
+    _PAREN_CLOSE_RE = re.compile(r"^\S*\)$")
+
+    @staticmethod
+    def _split_pod_line(line: str):
+        """Returns (cleaned_parts, last_restart). last_restart is e.g.
+        "22d ago", or "" if this pod has never restarted (or kubectl's
+        RESTARTS column didn't include the annotation)."""
+        parts = line.split()
+        cleaned = []
+        last_restart = ""
+        i = 0
+        while i < len(parts):
+            if (KubernetesTab._PAREN_OPEN_RE.match(parts[i]) and i + 1 < len(parts)
+                    and KubernetesTab._PAREN_CLOSE_RE.match(parts[i + 1])):
+                # "(22d" + "ago)" -> "22d ago"
+                last_restart = f"{parts[i][1:]} {parts[i + 1][:-1]}"
+                i += 2
+                continue
+            cleaned.append(parts[i])
+            i += 1
+        return cleaned, last_restart
+
     def _load_pods(self):
         self._run_cmd(f"kubectl get pods {self._ns_flag()} -o wide 2>&1", self._populate_pods)
 
@@ -783,7 +822,7 @@ class KubernetesTab(QWidget):
         # can differ). When one namespace is selected, it's implied by ns_combo.
         self.pod_tree.setColumnHidden(0, not all_ns)
         for line in out.strip().splitlines()[1:]:
-            parts = line.split()
+            parts, last_restart = self._split_pod_line(line)
             if all_ns:
                 # `kubectl get pods --all-namespaces -o wide` prepends NAMESPACE.
                 if len(parts) < 6:
@@ -798,7 +837,9 @@ class KubernetesTab(QWidget):
                 name, ready, status, restarts, age = parts[:5]
                 ip   = parts[5] if len(parts) > 5 else "-"
                 node = parts[6] if len(parts) > 6 else "-"
-            item = QTreeWidgetItem([ns, name, ready, status, restarts, age, ip, node])
+            item = QTreeWidgetItem(
+                [ns, name, ready, status, restarts, last_restart or "-", age, ip, node]
+            )
             s = status.lower()
             if "running" in s:
                 item.setForeground(3, QColor(T['SUCCESS']))

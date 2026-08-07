@@ -845,6 +845,58 @@ class DashboardTab(QWidget):
         self._node_cards[node_name] = card
         return card
 
+    def _get_or_create_node_card(self, node_name: str, is_bucket: bool = False) -> NodeCard:
+        """Like _add_node_card(), but reuses the existing card for
+        *node_name* if the grid already has one instead of always building
+        a fresh one.
+
+        This matters because CircularProgress only skips its fill
+        animation when setValue() is called again on the *same* ring
+        instance with an unchanged value (see progress_ring.py). A brand
+        new CircularProgress always starts at 0%, so recreating every
+        NodeCard (and therefore every ring) on each refresh made the CPU/
+        Memory rings replay their 0%→value animation every single refresh
+        cycle — even when the underlying reading hadn't moved at all.
+        Reusing cards by node name lets that existing guard actually do
+        its job.
+        """
+        card = self._node_cards.get(node_name)
+        if card is not None:
+            return card
+        return self._add_node_card(node_name, is_bucket=is_bucket)
+
+    def _reflow_node_grid(self, order: list):
+        """Reconcile self._node_cards with *order* (the list of node/
+        bucket names that should be shown this refresh, in display order).
+
+        Cards for names no longer present are removed and deleted; cards
+        for names still present are repositioned (if needed) rather than
+        recreated, so widgets — and their live CircularProgress rings —
+        persist across refreshes instead of being torn down every time.
+        """
+        order_set = set(order)
+
+        # Drop cards for nodes/buckets that disappeared.
+        for name in list(self._node_cards.keys()):
+            if name not in order_set:
+                card = self._node_cards.pop(name)
+                self.k8s_grid.removeWidget(card)
+                card.deleteLater()
+
+        # Detach the survivors so they can be re-placed in the right order
+        # (a no-op position-wise for the common case where nothing moved).
+        for name in order:
+            card = self._node_cards.get(name)
+            if card is not None:
+                self.k8s_grid.removeWidget(card)
+
+        for idx, name in enumerate(order):
+            card = self._node_cards.get(name)
+            if card is None:
+                continue
+            row, col = divmod(idx, self.NODE_GRID_COLS)
+            self.k8s_grid.addWidget(card, row, col + 1)
+
     def _apply_styles(self):
         self.ctrl_bar.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
         for frame in (self.vm_card["frame"], self.k8s_card["frame"]):
@@ -1108,9 +1160,13 @@ class DashboardTab(QWidget):
             if len(parts) >= 4 and _CPU_VAL_RE.match(parts[2]) and _MEM_VAL_RE.match(parts[3]):
                 pod_usage[(parts[0], parts[1])] = {"cpu": parts[2], "mem": parts[3]}
 
-        self._clear_node_grid()
+        # NOTE: no _clear_node_grid() here — cards are now reused across
+        # refreshes (see _get_or_create_node_card / _reflow_node_grid) so
+        # their CircularProgress rings only animate when a value actually
+        # changes, instead of replaying 0%→value on every refresh tick.
         self._pods_by_node_cache = {}
         self._pod_usage_cache    = pod_usage
+        _node_order = []
 
         _pressure_names = {"mem": "MemoryPressure", "disk": "DiskPressure", "pid": "PIDPressure"}
 
@@ -1139,9 +1195,10 @@ class DashboardTab(QWidget):
                 except ValueError:
                     mem_pct = None
 
-            card = self._add_node_card(name)
+            card = self._get_or_create_node_card(name)
             card.update_data(status, roles, cpu_pct, mem_pct,
                               len(node_pods), pressure_text, pressure_ok)
+            _node_order.append(name)
 
         # Anything left in pods_by_node belongs to a node that either
         # wasn't in the NODES list or is the synthetic "(unscheduled)"
@@ -1152,8 +1209,11 @@ class DashboardTab(QWidget):
         for node_name, node_pods in pods_by_node.items():
             label = "Unscheduled / other" if node_name == "(unscheduled)" else node_name
             self._pods_by_node_cache[label] = node_pods
-            card = self._add_node_card(label, is_bucket=True)
+            card = self._get_or_create_node_card(label, is_bucket=True)
             card.update_pod_count(len(node_pods))
+            _node_order.append(label)
+
+        self._reflow_node_grid(_node_order)
 
         # Push fresh data into any node detail windows that are still open,
         # instead of leaving them showing a stale snapshot until re-clicked.
