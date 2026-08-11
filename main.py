@@ -25,6 +25,7 @@ from main_window import EC2FileManager
 def _build_palette() -> QPalette:
     """Construct a QPalette that matches the active theme so native widgets
     inherit the right colours even before QSS kicks in."""
+    
     pal = QPalette()
     pal.setColor(QPalette.Window,          QColor(T["BG_DARK"]))
     pal.setColor(QPalette.WindowText,      QColor(T["TEXT_PRIMARY"]))
