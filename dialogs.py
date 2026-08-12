@@ -25,6 +25,7 @@ from PyQt5.QtGui import QFont, QColor, QTextCursor, QTextCharFormat, QKeySequenc
 from themes import T, apply_qss_to
 from utils import load_recent_instances, size_fmt, append_terminal_html, append_terminal_text, html_escape, monospace_font
 from workers import CommandWorker, _TransferWorker, ScpTransferWorker, track_worker, FileStreamReadWorker, MediaStreamServer, _StreamServerStartWorker
+from editor_widgets import CodeEditor, make_highlighter, LANG_LABEL
 
 # QtMultimedia is an optional Qt component — most PyQt5 installs on macOS
 # and Linux ship it, but guard the import so a system missing the
@@ -721,7 +722,9 @@ class FileEditorDialog(QDialog):
         self._remote    = remote_path
         self._sudo_user = sudo_user
         self._original  = content or ""
-        self._highlights = []
+        self._matches    = []   # [(start, end), ...] offsets of current find matches
+        self._match_idx  = -1
+        self._highlighter = None
 
         # When content is None, the editor opens immediately and streams
         # the file in live in the background (see _start_live_load) rather
@@ -750,18 +753,45 @@ class FileEditorDialog(QDialog):
         tb.setContentsMargins(10, 0, 10, 0)
         tb.setSpacing(6)
 
+        icon_lbl = QLabel("📝")
+        icon_lbl.setStyleSheet("font-size: 15px;")
+        tb.addWidget(icon_lbl)
+
         path_lbl = QLabel(remote_path)
         path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         tb.addWidget(path_lbl)
-        tb.addStretch()
 
-        self._modified_dot = QLabel("●")
-        self._modified_dot.setStyleSheet(f"color: {T['WARNING']}; font-size: 16px;")
+        self._modified_dot = QLabel("●  Unsaved")
+        self._modified_dot.setStyleSheet(
+            f"color: {T['WARNING']}; font-size: 12px; font-weight: 600; padding-left: 4px;"
+        )
         self._modified_dot.setToolTip("Unsaved changes")
         self._modified_dot.hide()
         tb.addWidget(self._modified_dot)
+        tb.addStretch()
 
-        # All five toolbar buttons share one fixed size so they read as a
+        # ── Zoom controls ────────────────────────────────────
+        zoom_out_btn = QPushButton("A−")
+        zoom_out_btn.setFixedSize(32, 30)
+        zoom_out_btn.setToolTip("Zoom out (Ctrl+-)")
+        zoom_out_btn.clicked.connect(lambda: self.editor.zoom_out())
+        tb.addWidget(zoom_out_btn)
+
+        zoom_reset_btn = QPushButton("A")
+        zoom_reset_btn.setFixedSize(28, 30)
+        zoom_reset_btn.setToolTip("Reset zoom (Ctrl+0)")
+        zoom_reset_btn.clicked.connect(lambda: self.editor.zoom_reset())
+        tb.addWidget(zoom_reset_btn)
+
+        zoom_in_btn = QPushButton("A+")
+        zoom_in_btn.setFixedSize(32, 30)
+        zoom_in_btn.setToolTip("Zoom in (Ctrl++)")
+        zoom_in_btn.clicked.connect(lambda: self.editor.zoom_in())
+        tb.addWidget(zoom_in_btn)
+
+        tb.addSpacing(8)
+
+        # All buttons below share one fixed size so they read as a
         # consistent row instead of each auto-sizing to its own label.
         TB_BTN_SIZE = (112, 30)
 
@@ -814,89 +844,102 @@ class FileEditorDialog(QDialog):
 
         # ── Find/Replace bar ──────────────────────────────────
         self._find_bar = QWidget()
-        self._find_bar.setFixedHeight(40)
+        self._find_bar.setFixedHeight(44)
         self._find_bar.setStyleSheet(
             f"background: {T['BG_ITEM']}; border-bottom: 1px solid {T['BORDER']};"
         )
         fb = QHBoxLayout(self._find_bar)
-        fb.setContentsMargins(10, 4, 10, 4)
+        fb.setContentsMargins(10, 6, 10, 6)
         fb.setSpacing(6)
+
+        input_style = (
+            f"QLineEdit {{ background: {T['BG_DARK']}; border: 1px solid {T['BORDER']}; "
+            f"border-radius: 7px; padding: 5px 10px; }}"
+            f"QLineEdit:focus {{ border-color: {T['ACCENT']}; }}"
+        )
 
         self._find_inp = QLineEdit()
         self._find_inp.setPlaceholderText("Find…")
-        self._find_inp.setFixedWidth(200)
+        self._find_inp.setFixedWidth(220)
+        self._find_inp.setStyleSheet(input_style)
         self._find_inp.textChanged.connect(self._do_highlight)
         self._find_inp.returnPressed.connect(self._find_next)
         fb.addWidget(self._find_inp)
 
+        self._match_lbl = QLabel("")
+        self._match_lbl.setFixedWidth(64)
+        self._match_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        fb.addWidget(self._match_lbl)
+
+        for text, tip, slot in [
+            ("↑", "Previous match (Shift+Enter)", self._find_prev),
+            ("↓", "Next match (Enter)",            self._find_next),
+        ]:
+            b = QPushButton(text)
+            b.setFixedSize(30, 30)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            fb.addWidget(b)
+
+        fb.addSpacing(6)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setStyleSheet(f"color: {T['BORDER']};")
+        fb.addWidget(divider)
+        fb.addSpacing(6)
+
         self._replace_inp = QLineEdit()
         self._replace_inp.setPlaceholderText("Replace…")
-        self._replace_inp.setFixedWidth(200)
+        self._replace_inp.setFixedWidth(220)
+        self._replace_inp.setStyleSheet(input_style)
         fb.addWidget(self._replace_inp)
 
         for label, slot in [
-            ("Prev",        self._find_prev),
-            ("Next",        self._find_next),
             ("Replace",     self._replace_one),
             ("Replace All", self._replace_all),
         ]:
             b = QPushButton(label)
-            b.setFixedWidth(86 if "All" in label else 60)
+            b.setFixedHeight(30)
+            b.setFixedWidth(96 if "All" in label else 70)
             b.clicked.connect(slot)
             fb.addWidget(b)
 
-        self._match_lbl = QLabel("")
-        self._match_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
-        fb.addWidget(self._match_lbl)
         fb.addStretch()
 
-        self._case_chk = QCheckBox("Case")
+        self._case_chk = QCheckBox("Aa")
+        self._case_chk.setToolTip("Match case")
         self._case_chk.setStyleSheet(f"color: {T['TEXT_DIM']};")
         self._case_chk.stateChanged.connect(self._do_highlight)
         fb.addWidget(self._case_chk)
+
+        self._regex_chk = QCheckBox(".*")
+        self._regex_chk.setToolTip("Regular expression")
+        self._regex_chk.setStyleSheet(f"color: {T['TEXT_DIM']}; padding-left: 6px;")
+        self._regex_chk.stateChanged.connect(self._do_highlight)
+        fb.addWidget(self._regex_chk)
+
+        close_find_btn = QPushButton("✕")
+        close_find_btn.setFixedSize(26, 26)
+        close_find_btn.setToolTip("Close (Esc)")
+        close_find_btn.clicked.connect(lambda: self._find_btn.setChecked(False))
+        fb.addWidget(close_find_btn)
 
         self._find_bar.hide()
         lay.addWidget(self._find_bar)
 
         # ── Editor area ───────────────────────────────────────
-        editor_area = QWidget()
-        editor_area.setStyleSheet(f"background: {T['BG_DARK']};")
-        ea_lay = QHBoxLayout(editor_area)
-        ea_lay.setContentsMargins(0, 0, 0, 0)
-        ea_lay.setSpacing(0)
-
-        self._line_nums = QPlainTextEdit()
-        self._line_nums.setReadOnly(True)
-        self._line_nums.setFixedWidth(52)
-        self._line_nums.setFont(monospace_font(12))
-        self._line_nums.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_MUTED']}; "
-            f"border: none; border-right: 1px solid {T['BORDER']}; padding: 12px 4px;"
-        )
-        self._line_nums.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._line_nums.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        ea_lay.addWidget(self._line_nums)
-
-        # QPlainTextEdit (not QTextEdit) — QTextEdit's QTextDocument backs
-        # every character with rich-text formatting/table machinery that a
-        # plain-text file never uses, so for a large file it carries real
-        # memory overhead for nothing. QPlainTextEdit is the same
-        # QTextDocument-based widget minus that overhead, and every API
-        # this dialog relies on (textCursor, find, document(), toPlainText,
-        # setPlainText, textChanged, cursorPositionChanged) works the same.
-        self.editor = QPlainTextEdit()
-        self.editor.setFont(monospace_font(12))
-        self.editor.setStyleSheet(
-            f"background: {T['BG_DARK']}; color: {T['TEXT_PRIMARY']}; "
-            f"border: none; padding: 12px;"
-        )
+        # CodeEditor paints its own line-number gutter directly into the
+        # QPlainTextEdit's viewport margin (see editor_widgets.py) — no
+        # second widget to keep scrolled in sync, and it comes with a
+        # soft current-line highlight and Ctrl+scroll zoom built in.
+        self.editor = CodeEditor(base_point_size=12)
         self.editor.setPlainText(content or "")
         self.editor.textChanged.connect(self._on_text_changed)
-        self.editor.verticalScrollBar().valueChanged.connect(self._sync_line_scroll)
-        ea_lay.addWidget(self.editor, 1)
-        lay.addWidget(editor_area, 1)
+        lay.addWidget(self.editor, 1)
 
-        self._update_line_numbers()
+        # Syntax highlighting — picked from the file extension; falls back
+        # to plain text (no highlighter) for unrecognised extensions.
+        self._highlighter, self._lang = make_highlighter(self.editor.document(), fname)
 
         # ── Status bar ────────────────────────────────────────
         sb_widget = QWidget()
@@ -918,7 +961,7 @@ class FileEditorDialog(QDialog):
         sb.addWidget(self._cursor_lbl)
 
         ext = os.path.splitext(fname)[1].lower()
-        lang_lbl = QLabel(ext.lstrip(".").upper() if ext else "TXT")
+        lang_lbl = QLabel(LANG_LABEL.get(self._lang, ext.lstrip(".").upper() if ext else "Plain Text"))
         lang_lbl.setStyleSheet(f"color: {T['ACCENT2']}; font-size: 13px; font-weight: 600;")
         sb.addWidget(lang_lbl)
         lay.addWidget(sb_widget)
@@ -932,19 +975,19 @@ class FileEditorDialog(QDialog):
         QShortcut(QKeySequence("Escape"), self._find_bar).activated.connect(
             lambda: self._find_btn.setChecked(False)
         )
+        QShortcut(QKeySequence("Shift+Return"), self._find_inp).activated.connect(self._find_prev)
+        QShortcut(QKeySequence("Ctrl++"), self).activated.connect(self.editor.zoom_in)
+        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.editor.zoom_in)
+        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.editor.zoom_out)
+        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.editor.zoom_reset)
 
         if self._loading:
             self._start_live_load()
 
-    # ── Line numbers ──────────────────────────────────────────
-    def _update_line_numbers(self):
-        n = self.editor.document().blockCount()
-        self._line_nums.setPlainText("\n".join(str(i) for i in range(1, n + 1)))
-
-    def _sync_line_scroll(self, val):
-        self._line_nums.verticalScrollBar().setValue(val)
-
     # ── Helpers ───────────────────────────────────────────────
+    # Line numbers are painted directly into CodeEditor's own gutter (see
+    # editor_widgets.py) and repaint themselves automatically on every
+    # block-count/scroll change — nothing to keep in sync here anymore.
     def _toggle_wrap(self, on: bool):
         self.editor.setLineWrapMode(QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap)
 
@@ -953,12 +996,13 @@ class FileEditorDialog(QDialog):
         if on:
             self._find_inp.setFocus()
             self._find_inp.selectAll()
+            if self._find_inp.text():
+                self._do_highlight()
         else:
             self._clear_highlights()
 
     def _on_text_changed(self):
         self._modified_dot.setVisible(self.editor.toPlainText() != self._original)
-        self._update_line_numbers()
 
     def _update_cursor_pos(self):
         cur = self.editor.textCursor()
@@ -995,10 +1039,10 @@ class FileEditorDialog(QDialog):
         # open. Off during the bulk load, back on once it's real editing.
         self.editor.setUndoRedoEnabled(False)
 
-        # Line-number/modified-dot recompute is O(n) — doing it on every
-        # single 64KB chunk of a big file would add up fast, so it's
-        # handled by our own throttled calls during the load instead of
-        # the normal per-keystroke textChanged handler.
+        # The modified-dot recompute (toPlainText() == original comparison)
+        # is O(n) — doing it on every single 64KB chunk of a big file would
+        # add up fast, so it's skipped entirely during the load and only
+        # reinstated once the whole file has arrived.
         try:
             self.editor.textChanged.disconnect(self._on_text_changed)
         except Exception:
@@ -1025,9 +1069,6 @@ class FileEditorDialog(QDialog):
         cur.movePosition(QTextCursor.End)
         cur.insertText(text)
         self._chunks_since_sync += 1
-        if self._chunks_since_sync >= 4:   # ~every 256KB, not every chunk
-            self._chunks_since_sync = 0
-            self._update_line_numbers()
 
     def _on_load_progress(self, done, total):
         try:
@@ -1064,7 +1105,6 @@ class FileEditorDialog(QDialog):
             self._save_close_btn.setEnabled(True)
             self._original = self.editor.toPlainText()
             self._modified_dot.hide()
-            self._update_line_numbers()
             self._set_status("Ready")
             self.editor.textChanged.connect(self._on_text_changed)
         except RuntimeError:
@@ -1091,92 +1131,145 @@ class FileEditorDialog(QDialog):
         QMessageBox.critical(self, "Cannot Open File", msg)
 
     # ── Find / Replace ────────────────────────────────────────
-    def _search_flags(self):
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if self._case_chk.isChecked():
-            flags |= QTextDocument.FindCaseSensitively
-        return flags
+    # Matches are tracked as a plain list of (start, end) character offsets
+    # computed with Python's `re` over the document's full text — this
+    # gives regex support and an accurate "3 of 17" counter/navigation for
+    # free, and (unlike QTextDocument.find + mergeCharFormat) the matches
+    # are painted purely as ExtraSelections, so they never touch the
+    # document's real character formatting and can't clash with the
+    # syntax highlighter's colours.
+    def _compiled_pattern(self):
+        term = self._find_inp.text()
+        if not term:
+            return None
+        flags = 0 if self._case_chk.isChecked() else re.IGNORECASE
+        try:
+            if self._regex_chk.isChecked():
+                return re.compile(term, flags)
+            return re.compile(re.escape(term), flags)
+        except re.error:
+            return None
 
     def _do_highlight(self):
-        from PyQt5.QtGui import QTextDocument
-        self._clear_highlights()
-        term = self._find_inp.text()
-        if not term:
-            self._match_lbl.setText("")
+        pattern = self._compiled_pattern()
+        self._matches   = []
+        self._match_idx = -1
+        if pattern is None:
+            self.editor.set_search_selections([])
+            if self._find_inp.text() and self._regex_chk.isChecked():
+                self._match_lbl.setText("bad regex")
+                self._match_lbl.setStyleSheet(f"color: {T['DANGER']}; font-size: 12px;")
+            else:
+                self._match_lbl.setText("")
+                self._match_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
             return
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor(T['WARNING']))
-        fmt.setForeground(QColor("#000000"))
-        doc    = self.editor.document()
-        cursor = QTextCursor(doc)
-        count  = 0
-        flags  = QTextDocument.FindCaseSensitively if self._case_chk.isChecked() else QTextDocument.FindFlags()
-        while True:
-            cursor = doc.find(term, cursor, flags)
-            if cursor.isNull():
-                break
-            cursor.mergeCharFormat(fmt)
-            self._highlights.append(cursor)
-            count += 1
-        self._match_lbl.setText(f"{count} match{'es' if count != 1 else ''}")
 
-    def _clear_highlights(self):
-        if not self._highlights:
+        text = self.editor.toPlainText()
+        self._matches = [(m.start(), m.end()) for m in pattern.finditer(text)]
+
+        # Keep navigation anchored near the cursor rather than always
+        # snapping back to match #1 on every keystroke.
+        cur_pos = self.editor.textCursor().position()
+        self._match_idx = next(
+            (i for i, (s, _e) in enumerate(self._matches) if s >= cur_pos), 0
+        ) if self._matches else -1
+
+        self._apply_match_selections()
+        self._update_match_label()
+
+    def _apply_match_selections(self):
+        doc = self.editor.document()
+        selections = []
+        normal_fmt = QTextCharFormat()
+        normal_fmt.setBackground(QColor(T['WARNING']))
+        normal_fmt.setForeground(QColor("#1a1a1a"))
+        current_fmt = QTextCharFormat()
+        current_fmt.setBackground(QColor(T['ACCENT']))
+        current_fmt.setForeground(QColor("#ffffff"))
+
+        for i, (start, end) in enumerate(self._matches):
+            sel = QTextEdit.ExtraSelection()
+            sel.format = current_fmt if i == self._match_idx else normal_fmt
+            c = QTextCursor(doc)
+            c.setPosition(start)
+            c.setPosition(end, QTextCursor.KeepAnchor)
+            sel.cursor = c
+            selections.append(sel)
+        self.editor.set_search_selections(selections)
+
+    def _update_match_label(self):
+        if not self._matches:
+            self._match_lbl.setText("No results" if self._find_inp.text() else "")
+        else:
+            self._match_lbl.setText(f"{self._match_idx + 1} of {len(self._matches)}")
+        self._match_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+
+    def _goto_match(self, idx):
+        if not self._matches:
             return
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor(T['BG_DARK']))
-        fmt.setForeground(QColor(T['TEXT_PRIMARY']))
-        for c in self._highlights:
-            c.mergeCharFormat(fmt)
-        self._highlights = []
+        self._match_idx = idx % len(self._matches)
+        start, end = self._matches[self._match_idx]
+        c = self.editor.textCursor()
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.KeepAnchor)
+        self.editor.setTextCursor(c)
+        self.editor.ensureCursorVisible()
+        self._apply_match_selections()
+        self._update_match_label()
 
     def _find_next(self):
-        from PyQt5.QtGui import QTextDocument
-        term = self._find_inp.text()
-        if not term:
-            return
-        flags = QTextDocument.FindCaseSensitively if self._case_chk.isChecked() else QTextDocument.FindFlags()
-        found = self.editor.find(term, flags)
-        if not found:
-            cur = self.editor.textCursor()
-            cur.movePosition(QTextCursor.Start)
-            self.editor.setTextCursor(cur)
-            self.editor.find(term, flags)
+        if not self._matches:
+            self._do_highlight()
+        if self._matches:
+            self._goto_match(self._match_idx + 1 if self._match_idx >= 0 else 0)
 
     def _find_prev(self):
-        from PyQt5.QtGui import QTextDocument
-        term = self._find_inp.text()
-        if not term:
-            return
-        flags = QTextDocument.FindBackward
-        if self._case_chk.isChecked():
-            flags |= QTextDocument.FindCaseSensitively
-        found = self.editor.find(term, flags)
-        if not found:
-            cur = self.editor.textCursor()
-            cur.movePosition(QTextCursor.End)
-            self.editor.setTextCursor(cur)
-            self.editor.find(term, flags)
+        if not self._matches:
+            self._do_highlight()
+        if self._matches:
+            self._goto_match(self._match_idx - 1 if self._match_idx >= 0 else -1)
+
+    def _clear_highlights(self):
+        self._matches   = []
+        self._match_idx = -1
+        self.editor.set_search_selections([])
+        self._match_lbl.setText("")
 
     def _replace_one(self):
-        cur = self.editor.textCursor()
-        if cur.hasSelection():
-            cur.insertText(self._replace_inp.text())
-        self._find_next()
+        if not self._matches:
+            self._do_highlight()
+        if not self._matches or self._match_idx < 0:
+            return
+        start, end = self._matches[self._match_idx]
+        c = self.editor.textCursor()
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.KeepAnchor)
+        c.insertText(self._replace_inp.text())
         self._do_highlight()
 
     def _replace_all(self):
-        term    = self._find_inp.text()
+        pattern = self._compiled_pattern()
         replace = self._replace_inp.text()
-        if not term:
+        if pattern is None:
             return
-        text  = self.editor.toPlainText()
-        flags = re.IGNORECASE if not self._case_chk.isChecked() else 0
-        new_text, n = re.subn(re.escape(term), replace, text, flags=flags)
+        text = self.editor.toPlainText()
+        try:
+            new_text, n = pattern.subn(
+                replace if self._regex_chk.isChecked() else replace.replace("\\", "\\\\"),
+                text,
+            )
+        except re.error as e:
+            self._set_status(f"Replace failed: {e}", T['DANGER'])
+            return
         if n:
+            cur = self.editor.textCursor()
+            pos = cur.position()
             self.editor.setPlainText(new_text)
+            cur = self.editor.textCursor()
+            cur.setPosition(min(pos, len(new_text)))
+            self.editor.setTextCursor(cur)
             self._set_status(f"Replaced {n} occurrence{'s' if n != 1 else ''}", T['SUCCESS'])
+            QTimer.singleShot(2000, lambda: self._set_status("Ready"))
         self._do_highlight()
 
     # ── Save ──────────────────────────────────────────────────

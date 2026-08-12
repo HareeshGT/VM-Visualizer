@@ -485,7 +485,8 @@ class NodeCard(QFrame):
 
     # ── Data ───────────────────────────────────────────────────
     def update_data(self, status: str, roles: str, cpu_pct, mem_pct,
-                     pod_count: int, pressure_text: str, pressure_ok: bool):
+                     pod_count: int, pressure_text: str, pressure_ok: bool,
+                     cpu_tip: str = None, mem_tip: str = None):
         """Update a real-node card. Not used for bucket cards — those only
         ever show a pod count, set directly via update_pod_count()."""
         self.status_lbl.setText(status or "—")
@@ -497,12 +498,16 @@ class NodeCard(QFrame):
 
         if cpu_pct is not None:
             self.cpu_ring.setValue(cpu_pct, _pct_color(cpu_pct))
+            self.cpu_ring.setToolTip(cpu_tip or f"CPU usage: {cpu_pct:.1f}%")
         else:
             self.cpu_ring.setValue(0)
+            self.cpu_ring.setToolTip("CPU usage unavailable")
         if mem_pct is not None:
             self.mem_ring.setValue(mem_pct, _pct_color(mem_pct))
+            self.mem_ring.setToolTip(mem_tip or f"Memory usage: {mem_pct:.1f}%")
         else:
             self.mem_ring.setValue(0)
+            self.mem_ring.setToolTip("Memory usage unavailable")
 
         self.pods_lbl.setText(f"📦  {pod_count} pod(s)")
         self.pressure_lbl.setText(pressure_text or "")
@@ -1000,12 +1005,18 @@ class DashboardTab(QWidget):
         if cpu_pct is not None:
             self._style_ring(self.cpu_ring["ring"], cpu_pct)
             self.cpu_ring["val_lbl"].setText(f"{cpu_pct:.0f}% busy")
+            self.cpu_ring["ring"].setToolTip(
+                f"CPU usage: {cpu_pct:.1f}% busy\n"
+                f"Cores: {cores}\n"
+                f"Model: {model}"
+            )
         else:
             # Reset the ring too, not just the label — otherwise a ring that
             # was populated by an earlier successful refresh keeps showing
             # that stale value forever once this stat becomes unavailable.
             self.cpu_ring["ring"].setValue(0)
             self.cpu_ring["val_lbl"].setText("unavailable")
+            self.cpu_ring["ring"].setToolTip("CPU usage unavailable")
 
         # Memory — a "Mem: total used free shared buff/cache available"
         # line, same shape whether it came from Linux `free -m` or the
@@ -1015,18 +1026,38 @@ class DashboardTab(QWidget):
         if mem_line:
             parts = mem_line.split()
             try:
-                total_mb, used_mb = float(parts[1]), float(parts[2])
+                total_mb, free_mb = float(parts[1]), float(parts[3])
+                used_mb = total_mb - free_mb
                 mem_pct = (used_mb / total_mb * 100.0) if total_mb else 0.0
                 self._style_ring(self.mem_ring["ring"], mem_pct)
                 self.mem_ring["val_lbl"].setText(
                     f"{used_mb/1024:.1f} / {total_mb/1024:.1f} GB"
                 )
+                tip_lines = [
+                    f"Memory usage: {mem_pct:.1f}%",
+                    f"Total: {total_mb/1024:.2f} GB",
+                    f"Used: {used_mb/1024:.2f} GB",
+                    f"Free: {free_mb/1024:.2f} GB",
+                ]
+                # shared/buff-cache/available are only meaningful on the
+                # Linux `free -m` branch — the macOS branch always fills
+                # those columns with 0, so skip them there.
+                if len(parts) >= 7:
+                    shared_mb, buffcache_mb, avail_mb = (
+                        float(parts[4]), float(parts[5]), float(parts[6])
+                    )
+                    if shared_mb or buffcache_mb:
+                        tip_lines.append(f"Buff/cache: {buffcache_mb/1024:.2f} GB")
+                        tip_lines.append(f"Available: {avail_mb/1024:.2f} GB")
+                self.mem_ring["ring"].setToolTip("\n".join(tip_lines))
             except (ValueError, IndexError):
                 self.mem_ring["ring"].setValue(0)
                 self.mem_ring["val_lbl"].setText("unavailable")
+                self.mem_ring["ring"].setToolTip("Memory usage unavailable")
         else:
             self.mem_ring["ring"].setValue(0)
             self.mem_ring["val_lbl"].setText("unavailable")
+            self.mem_ring["ring"].setToolTip("Memory usage unavailable")
 
         # Disk mounts — also accumulated into an overall storage total/used
         # (in bytes, parsed back out of df's human-readable Size/Used
@@ -1058,9 +1089,18 @@ class DashboardTab(QWidget):
             self.storage_ring["val_lbl"].setText(
                 f"{size_fmt(used_bytes)} / {size_fmt(total_bytes)}"
             )
+            avail_bytes = max(0.0, total_bytes - used_bytes)
+            self.storage_ring["ring"].setToolTip(
+                f"Storage usage: {storage_pct:.1f}%\n"
+                f"Total: {size_fmt(total_bytes)}\n"
+                f"Used: {size_fmt(used_bytes)}\n"
+                f"Available: {size_fmt(avail_bytes)}\n"
+                f"Across {self.disk_tree.topLevelItemCount()} mount(s)"
+            )
         else:
             self.storage_ring["ring"].setValue(0)
             self.storage_ring["val_lbl"].setText("unavailable")
+            self.storage_ring["ring"].setToolTip("Storage usage unavailable")
 
         self._mark_updated()
         self.status_msg.emit("Dashboard updated")
@@ -1122,7 +1162,10 @@ class DashboardTab(QWidget):
         for line in sec.get("TOP", []):
             parts = line.split()
             if len(parts) >= 5 and parts[2].endswith("%") and parts[4].endswith("%"):
-                top[parts[0]] = {"cpu_pct": parts[2].rstrip("%"), "mem_pct": parts[4].rstrip("%")}
+                top[parts[0]] = {
+                    "cpu_pct": parts[2].rstrip("%"), "mem_pct": parts[4].rstrip("%"),
+                    "cpu_cores": parts[1], "mem_bytes": parts[3],
+                }
 
         # Full pod inventory, grouped by the node each pod is scheduled on.
         # Pods not yet scheduled (nodeName empty — usually Pending) are
@@ -1185,19 +1228,23 @@ class DashboardTab(QWidget):
 
             t = top.get(name)
             cpu_pct = mem_pct = None
+            cpu_tip = mem_tip = None
             if t is not None:
                 try:
                     cpu_pct = float(t["cpu_pct"])
+                    cpu_tip = f"CPU usage: {cpu_pct:.1f}%\nCores used: {t['cpu_cores']}"
                 except ValueError:
                     cpu_pct = None
                 try:
                     mem_pct = float(t["mem_pct"])
+                    mem_tip = f"Memory usage: {mem_pct:.1f}%\nUsed: {t['mem_bytes']}"
                 except ValueError:
                     mem_pct = None
 
             card = self._get_or_create_node_card(name)
             card.update_data(status, roles, cpu_pct, mem_pct,
-                              len(node_pods), pressure_text, pressure_ok)
+                              len(node_pods), pressure_text, pressure_ok,
+                              cpu_tip, mem_tip)
             _node_order.append(name)
 
         # Anything left in pods_by_node belongs to a node that either
