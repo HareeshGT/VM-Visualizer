@@ -1627,39 +1627,37 @@ class KubernetesTab(QWidget):
                                 "Check one or more services below to restart their tunnel.")
             return
 
-        self._tunnel_restart_queue = list(services)
-        self._tunnel_restart_failed = []
+        # Each service's restart is an independent SSH command (kill-port +
+        # nohup port-forward), so there's no reason to wait for one to
+        # finish before starting the next — paramiko opens a new channel
+        # per exec_command on the same transport, so concurrent workers on
+        # self.ssh are safe. Fire them all at once and just track how many
+        # are still outstanding, instead of the old pop-one/wait/run-next
+        # queue that serialized what could be a dozen services.
+        self._tunnel_restart_pending = len(services)
+        self._tunnel_restart_failed  = []
 
         self.tunnel_restart_btn.setEnabled(False)
         self.progress.show()
 
-        self._run_next_tunnel_restart()
-
-    def _run_next_tunnel_restart(self):
-        if not self._tunnel_restart_queue:
-            self._finish_kubectl_tunnel_restarts()
-            return
-
-        service = self._tunnel_restart_queue.pop(0)
-        cmd = self._build_kubectl_tunnel_restart_cmd([service])  # single-service cmd
-
-        append_terminal_html(
-            self.tunnel_log,
-            f"<span style='color:{T['ACCENT2']}'>$ {self._esc(cmd)}</span>"
-        )
-
-        worker = CommandWorker(self.ssh, cmd)
-        worker.done.connect(lambda out, svc=service: self._on_tunnel_step_done(svc, out))
-        worker.error.connect(lambda err, svc=service: self._on_tunnel_step_error(svc, err))
-        track_worker(self._workers, worker)
-        worker.start()
+        for service in services:
+            cmd = self._build_kubectl_tunnel_restart_cmd([service])  # single-service cmd
+            append_terminal_html(
+                self.tunnel_log,
+                f"<span style='color:{T['ACCENT2']}'>$ {self._esc(cmd)}</span>"
+            )
+            worker = CommandWorker(self.ssh, cmd)
+            worker.done.connect(lambda out, svc=service: self._on_tunnel_step_done(svc, out))
+            worker.error.connect(lambda err, svc=service: self._on_tunnel_step_error(svc, err))
+            track_worker(self._workers, worker)
+            worker.start()
 
     def _on_tunnel_step_done(self, service, output):
         append_terminal_html(
             self.tunnel_log,
             f"<span style='color:{T['SUCCESS']}'>✓ {self._esc(service['name'])}</span>"
         )
-        self._run_next_tunnel_restart()
+        self._on_tunnel_step_finished()
 
     def _on_tunnel_step_error(self, service, err):
         self._tunnel_restart_failed.append(service['name'])
@@ -1667,7 +1665,15 @@ class KubernetesTab(QWidget):
             self.tunnel_log,
             f"<span style='color:{T['DANGER']}'>✗ {self._esc(service['name'])}: {self._esc(str(err))}</span>"
         )
-        self._run_next_tunnel_restart()
+        self._on_tunnel_step_finished()
+
+    def _on_tunnel_step_finished(self):
+        # Workers finish in whatever order the remote shell happens to
+        # complete them, not the order they were started — so completion
+        # is tracked purely by count, not by popping a queue.
+        self._tunnel_restart_pending -= 1
+        if self._tunnel_restart_pending <= 0:
+            self._finish_kubectl_tunnel_restarts()
 
     def _finish_kubectl_tunnel_restarts(self):
         if self._tunnel_restart_failed:
