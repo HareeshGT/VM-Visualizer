@@ -191,6 +191,20 @@ class KubernetesTab(QWidget):
         btn.setStyleSheet("padding: 0 14px;")
         return btn
 
+    def _set_count_badge(self, lbl: QLabel, text: str, color_key: str = "TEXT_DIM"):
+        """Style a QLabel as a small pill badge, matching the card badges
+        in k8s_cards.py, and set its text in one call."""
+        color = T.get(color_key, T["TEXT_DIM"])
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        lbl.setText(text)
+        lbl.setStyleSheet(
+            f"background: rgba({r},{g},{b},0.15); color: {color}; "
+            f"border: 1px solid rgba({r},{g},{b},0.4); border-radius: 9px; "
+            f"padding: 3px 10px; font-size: 12px; font-weight: 700;"
+        )
+
     def _build_pods_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -205,6 +219,9 @@ class KubernetesTab(QWidget):
         self.pod_filter.setMaximumWidth(200)
         self.pod_filter.textChanged.connect(self._filter_pods)
         tb.addWidget(self.pod_filter)
+
+        self.pod_count_lbl = QLabel("")
+        tb.addWidget(self.pod_count_lbl)
         tb.addStretch()
 
         # Safe, frequent actions live inside one clustered pill; the
@@ -277,6 +294,9 @@ class KubernetesTab(QWidget):
         self.deploy_filter.setMaximumWidth(200)
         self.deploy_filter.textChanged.connect(self._filter_deployments)
         tb.addWidget(self.deploy_filter)
+
+        self.deploy_count_lbl = QLabel("")
+        tb.addWidget(self.deploy_count_lbl)
         tb.addStretch()
 
         self.scale_spin = QSpinBox()
@@ -789,6 +809,10 @@ class KubernetesTab(QWidget):
     def _clear_all(self):
         self.pod_list.clear()
         self.deploy_list.clear()
+        self.pod_count_lbl.setText("")
+        self.pod_count_lbl.setStyleSheet("")
+        self.deploy_count_lbl.setText("")
+        self.deploy_count_lbl.setStyleSheet("")
         self.svc_tree.clear()
         self.ing_tree.clear()
         self.cfg_list.clear()
@@ -849,6 +873,8 @@ class KubernetesTab(QWidget):
     def _populate_pods(self, out: str):
         self.pod_list.clear()
         all_ns = (self._current_ns == "(all namespaces)")
+        total   = 0
+        running = 0
         # The namespace chip on each card is only shown in "(all namespaces)"
         # view (i.e. rows can differ) — when one namespace is selected it's
         # implied by ns_combo already, so the chip would just repeat itself.
@@ -878,6 +904,18 @@ class KubernetesTab(QWidget):
             item.setSizeHint(QSize(0, PodCardWidget.CARD_HEIGHT))
             self.pod_list.addItem(item)
             self.pod_list.setItemWidget(item, PodCardWidget(meta, all_ns))
+            total += 1
+            if "running" in status.lower():
+                running += 1
+        if total == 0:
+            color_key = "TEXT_MUTED"
+        elif running == total:
+            color_key = "SUCCESS"
+        elif running == 0:
+            color_key = "DANGER"
+        else:
+            color_key = "WARNING"
+        self._set_count_badge(self.pod_count_lbl, f"{running}/{total} running", color_key)
         # Refreshing rebuilds every row from scratch, which would otherwise
         # silently show everything again even though the filter box still
         # has text in it — reapply whatever's currently typed there.
@@ -969,6 +1007,8 @@ class KubernetesTab(QWidget):
     def _populate_deployments(self, out: str):
         self.deploy_list.clear()
         all_ns = (self._current_ns == "(all namespaces)")
+        total = 0
+        ready_count = 0
         for line in out.strip().splitlines()[1:]:
             parts = line.split()
             if all_ns:
@@ -995,6 +1035,22 @@ class KubernetesTab(QWidget):
             item.setSizeHint(QSize(0, DeploymentCardWidget.CARD_HEIGHT))
             self.deploy_list.addItem(item)
             self.deploy_list.setItemWidget(item, DeploymentCardWidget(meta, all_ns))
+            total += 1
+            try:
+                cur, desired = ready.split("/")
+                if cur == desired:
+                    ready_count += 1
+            except Exception:
+                pass
+        if total == 0:
+            color_key = "TEXT_MUTED"
+        elif ready_count == total:
+            color_key = "SUCCESS"
+        elif ready_count == 0:
+            color_key = "DANGER"
+        else:
+            color_key = "WARNING"
+        self._set_count_badge(self.deploy_count_lbl, f"{total} deployment{'s' if total != 1 else ''} · {ready_count} ready", color_key)
         # Same reasoning as _populate_pods: rebuild wipes the visual filter
         # state even though the filter box still has text — reapply it.
         self._filter_deployments(self.deploy_filter.text())
