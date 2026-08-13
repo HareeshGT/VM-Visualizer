@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess
 from PyQt5.QtGui import QColor, QFont, QFontDatabase
+from PyQt5.QtWidgets import QCompleter
 
 from themes import T, apply_qss_to
 from workers import CommandWorker, track_worker
@@ -97,11 +98,24 @@ class KubernetesTab(QWidget):
         cb.setContentsMargins(12, 0, 12, 0)
         cb.setSpacing(10)
 
-        cb.addWidget(QLabel("⎈  Namespace:"))
+        ns_row = QHBoxLayout()
+        ns_row.setSpacing(8)
+        self.ns_dot = QLabel("●")
+        self.ns_dot.setStyleSheet(f"color: {T['ACCENT']}; font-size: 9px;")
+        ns_row.addWidget(self.ns_dot)
+        ns_lbl = QLabel("Namespace")
+        ns_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        ns_row.addWidget(ns_lbl)
         self.ns_combo = QComboBox()
-        self.ns_combo.setMinimumWidth(160)
+        self.ns_combo.setMinimumWidth(170)
+        self.ns_combo.setMaxVisibleItems(12)
+        self.ns_combo.setEditable(True)
+        self.ns_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.ns_combo.completer().setCompletionMode(QCompleter.PopupCompletion)
+        self.ns_combo.completer().setFilterMode(Qt.MatchContains)
         self.ns_combo.currentTextChanged.connect(self._on_ns_change)
-        cb.addWidget(self.ns_combo)
+        ns_row.addWidget(self.ns_combo)
+        cb.addLayout(ns_row)
         cb.addWidget(self._vline())
 
         self.refresh_btn = self._toolbar_btn("↺  Refresh")
@@ -191,16 +205,36 @@ class KubernetesTab(QWidget):
         self.pod_filter.textChanged.connect(self._filter_pods)
         tb.addWidget(self.pod_filter)
         tb.addStretch()
+
+        # Safe, frequent actions live inside one clustered pill; the
+        # destructive action (Delete) sits outside it with a gap, so it
+        # can never be misclicked as "just another button in the row".
+        cluster = QFrame()
+        cluster.setObjectName("action_cluster")
+        cl = QHBoxLayout(cluster)
+        cl.setContentsMargins(4, 4, 4, 4)
+        cl.setSpacing(2)
         for label, obj, slot in [
-            ("📋  Logs",    "pod_logs_btn",   self._pod_logs),
-            ("💻  Exec",    "pod_exec_btn",   self._pod_exec),
-            ("🗑  Delete",  "pod_del_btn",    self._pod_delete),
-            ("↺  Restart", "pod_restart_btn", self._pod_restart),
+            ("📋  Logs",    "pod_logs_btn",    self._pod_logs),
+            ("💻  Exec",    "pod_exec_btn",    self._pod_exec),
+            ("↺  Restart",  "pod_restart_btn", self._pod_restart),
         ]:
-            btn = self._toolbar_btn(label, object_name="danger" if "Delete" in label else None)
+            btn = self._toolbar_btn(label)
+            btn.setFlat(True)
+            btn.setStyleSheet("border: none; padding: 0 14px; background: transparent;")
             setattr(self, obj, btn)
             btn.clicked.connect(slot)
-            tb.addWidget(btn)
+            cl.addWidget(btn)
+        tb.addWidget(cluster)
+        self.pod_action_cluster = cluster
+
+        self.pod_del_btn = self._toolbar_btn("🗑  Delete", object_name="danger")
+        self.pod_del_btn.clicked.connect(self._pod_delete)
+        tb.addWidget(self.pod_del_btn)
+
+        cluster.setStyleSheet(
+            f"QFrame#action_cluster {{ background: {T['BG_ITEM']}; border-radius: 8px; }}"
+        )
 
         tb_widget = QWidget()
         tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
@@ -618,6 +652,11 @@ class KubernetesTab(QWidget):
             f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
         )
         self.health_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.ns_dot.setStyleSheet(f"color: {T['ACCENT']}; font-size: 9px;")
+        if hasattr(self, "pod_action_cluster"):
+            self.pod_action_cluster.setStyleSheet(
+                f"QFrame#action_cluster {{ background: {T['BG_ITEM']}; border-radius: 8px; }}"
+            )
         self.k8s_terminal.setStyleSheet(
             f"background: #0d0d1a; color: {T['SUCCESS']}; border: none; padding: 8px;"
         )

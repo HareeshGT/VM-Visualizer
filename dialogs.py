@@ -753,79 +753,106 @@ class FileEditorDialog(QDialog):
         tb.setContentsMargins(10, 0, 10, 0)
         tb.setSpacing(6)
 
+        # ── Filename chip ─────────────────────────────────────
+        # File identity (icon + name + unsaved state) reads as one unit
+        # instead of an icon, a full path label, and a separate warning
+        # label competing for attention across the same row.
+        chip = QFrame()
+        chip.setObjectName("file_chip")
+        chip_lay = QHBoxLayout(chip)
+        chip_lay.setContentsMargins(10, 4, 10, 4)
+        chip_lay.setSpacing(6)
         icon_lbl = QLabel("📝")
-        icon_lbl.setStyleSheet("font-size: 15px;")
-        tb.addWidget(icon_lbl)
-
-        path_lbl = QLabel(remote_path)
-        path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
-        tb.addWidget(path_lbl)
-
-        self._modified_dot = QLabel("●  Unsaved")
+        icon_lbl.setStyleSheet("font-size: 14px; background: transparent;")
+        chip_lay.addWidget(icon_lbl)
+        path_lbl = QLabel(fname)
+        path_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 13px; font-weight: 600; background: transparent;")
+        path_lbl.setToolTip(remote_path)
+        chip_lay.addWidget(path_lbl)
+        self._modified_dot = QLabel("unsaved")
         self._modified_dot.setStyleSheet(
-            f"color: {T['WARNING']}; font-size: 12px; font-weight: 600; padding-left: 4px;"
+            f"background: {T['WARNING']}; color: #1a1a1a; font-size: 10px; font-weight: 700; "
+            f"border-radius: 8px; padding: 1px 8px;"
         )
-        self._modified_dot.setToolTip("Unsaved changes")
         self._modified_dot.hide()
-        tb.addWidget(self._modified_dot)
+        chip_lay.addWidget(self._modified_dot)
+        chip.setStyleSheet(f"QFrame#file_chip {{ background: {T['BG_ITEM']}; border-radius: 14px; }}")
+        tb.addWidget(chip)
         tb.addStretch()
 
-        # ── Zoom controls ────────────────────────────────────
-        zoom_out_btn = QPushButton("A−")
-        zoom_out_btn.setFixedSize(32, 30)
-        zoom_out_btn.setToolTip("Zoom out (Ctrl+-)")
-        zoom_out_btn.clicked.connect(lambda: self.editor.zoom_out())
-        tb.addWidget(zoom_out_btn)
+        # ── View controls: segmented zoom + icon toggles ──────
+        zoom_frame = QFrame()
+        zoom_frame.setObjectName("zoom_group")
+        zf = QHBoxLayout(zoom_frame)
+        zf.setContentsMargins(2, 2, 2, 2)
+        zf.setSpacing(0)
 
-        zoom_reset_btn = QPushButton("A")
-        zoom_reset_btn.setFixedSize(28, 30)
-        zoom_reset_btn.setToolTip("Reset zoom (Ctrl+0)")
-        zoom_reset_btn.clicked.connect(lambda: self.editor.zoom_reset())
-        tb.addWidget(zoom_reset_btn)
+        def _flat_btn(text, tip, size=(28, 26)):
+            b = QPushButton(text)
+            b.setFixedSize(*size)
+            b.setToolTip(tip)
+            b.setFlat(True)
+            b.setStyleSheet("border: none; background: transparent;")
+            return b
 
-        zoom_in_btn = QPushButton("A+")
-        zoom_in_btn.setFixedSize(32, 30)
-        zoom_in_btn.setToolTip("Zoom in (Ctrl++)")
-        zoom_in_btn.clicked.connect(lambda: self.editor.zoom_in())
-        tb.addWidget(zoom_in_btn)
+        zoom_out_btn = _flat_btn("−", "Zoom out (Ctrl+-)")
+        zoom_out_btn.clicked.connect(lambda: (self.editor.zoom_out(), self._update_zoom_label()))
+        zf.addWidget(zoom_out_btn)
 
-        tb.addSpacing(8)
+        self._zoom_lbl = QLabel("100%")
+        self._zoom_lbl.setFixedWidth(38)
+        self._zoom_lbl.setAlignment(Qt.AlignCenter)
+        self._zoom_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px; background: transparent;")
+        self._zoom_lbl.setToolTip("Reset zoom (Ctrl+0)")
+        zf.addWidget(self._zoom_lbl)
 
-        # All buttons below share one fixed size so they read as a
-        # consistent row instead of each auto-sizing to its own label.
-        TB_BTN_SIZE = (112, 30)
+        zoom_in_btn = _flat_btn("+", "Zoom in (Ctrl++)")
+        zoom_in_btn.clicked.connect(lambda: (self.editor.zoom_in(), self._update_zoom_label()))
+        zf.addWidget(zoom_in_btn)
 
-        self._wrap_btn = QPushButton("⇌ Wrap")
+        zoom_frame.setStyleSheet(f"QFrame#zoom_group {{ background: {T['BG_ITEM']}; border-radius: 7px; }}")
+        tb.addWidget(zoom_frame)
+
+        tb.addSpacing(6)
+
+        self._wrap_btn = QPushButton("⇌")
         self._wrap_btn.setCheckable(True)
         self._wrap_btn.setChecked(True)
-        self._wrap_btn.setFixedSize(*TB_BTN_SIZE)
+        self._wrap_btn.setFixedSize(30, 30)
+        self._wrap_btn.setToolTip("Wrap lines")
         self._wrap_btn.toggled.connect(self._toggle_wrap)
         tb.addWidget(self._wrap_btn)
 
-        self._find_btn = QPushButton("🔍 Find")
+        self._find_btn = QPushButton("🔍")
         self._find_btn.setCheckable(True)
-        self._find_btn.setFixedSize(*TB_BTN_SIZE)
+        self._find_btn.setFixedSize(30, 30)
+        self._find_btn.setToolTip("Find / Replace (Ctrl+F)")
         self._find_btn.toggled.connect(self._toggle_find_bar)
         tb.addWidget(self._find_btn)
 
-        save_btn = QPushButton("💾  Save")
-        save_btn.setObjectName("primary")
-        save_btn.setFixedSize(*TB_BTN_SIZE)
-        save_btn.clicked.connect(self._save)
-        tb.addWidget(save_btn)
-        self._save_btn = save_btn
+        tb.addSpacing(10)
 
-        save_close_btn = QPushButton("Save & Close")
-        save_close_btn.setFixedSize(*TB_BTN_SIZE)
-        save_close_btn.clicked.connect(self._save_and_close)
-        tb.addWidget(save_close_btn)
-        self._save_close_btn = save_close_btn
+        # ── Actions: one primary CTA, save+close folded into a checkbox
+        # next to it rather than a third competing button ─────
+        self._save_close_btn = QCheckBox("Close after save")
+        self._save_close_btn.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        tb.addWidget(self._save_close_btn)
 
         discard_btn = QPushButton("Discard")
         discard_btn.setObjectName("danger")
-        discard_btn.setFixedSize(*TB_BTN_SIZE)
+        discard_btn.setFixedHeight(30)
         discard_btn.clicked.connect(self._confirm_close)
         tb.addWidget(discard_btn)
+
+        save_btn = QPushButton("💾  Save")
+        save_btn.setObjectName("primary")
+        save_btn.setFixedSize(96, 30)
+        save_btn.clicked.connect(
+            lambda: self._save_and_close() if self._save_close_btn.isChecked() else self._save()
+        )
+        tb.addWidget(save_btn)
+        self._save_btn = save_btn
+
         lay.addWidget(tb_widget)
 
         # Thin indeterminate/progress strip shown only while a file is
@@ -976,10 +1003,14 @@ class FileEditorDialog(QDialog):
             lambda: self._find_btn.setChecked(False)
         )
         QShortcut(QKeySequence("Shift+Return"), self._find_inp).activated.connect(self._find_prev)
-        QShortcut(QKeySequence("Ctrl++"), self).activated.connect(self.editor.zoom_in)
-        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.editor.zoom_in)
-        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.editor.zoom_out)
-        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.editor.zoom_reset)
+        QShortcut(QKeySequence("Ctrl++"), self).activated.connect(
+            lambda: (self.editor.zoom_in(), self._update_zoom_label()))
+        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(
+            lambda: (self.editor.zoom_in(), self._update_zoom_label()))
+        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(
+            lambda: (self.editor.zoom_out(), self._update_zoom_label()))
+        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(
+            lambda: (self.editor.zoom_reset(), self._update_zoom_label()))
 
         if self._loading:
             self._start_live_load()
@@ -988,6 +1019,10 @@ class FileEditorDialog(QDialog):
     # Line numbers are painted directly into CodeEditor's own gutter (see
     # editor_widgets.py) and repaint themselves automatically on every
     # block-count/scroll change — nothing to keep in sync here anymore.
+    def _update_zoom_label(self):
+        pct = round(self.editor._pt / self.editor._base_pt * 100)
+        self._zoom_lbl.setText(f"{pct}%")
+
     def _toggle_wrap(self, on: bool):
         self.editor.setLineWrapMode(QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap)
 

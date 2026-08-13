@@ -29,10 +29,10 @@ import time
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem,
+    QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem, QGraphicsDropShadowEffect,
 )
 from PyQt5.QtCore import (
-    Qt, QTimer, pyqtSignal,
+    Qt, QTimer, pyqtSignal, QVariantAnimation, QEasingCurve,
 )
 from PyQt5.QtGui import QColor
 
@@ -191,6 +191,17 @@ def _pct_color(pct: float) -> str:
     if pct >= 65:
         return T["WARNING"]
     return T["SUCCESS"]
+
+
+def _lerp_color(c1: str, c2: str, t: float) -> str:
+    """Blend two hex colours at fraction t (0 = c1, 1 = c2) — drives the
+    hover border-color animation frame by frame since QSS itself can't
+    transition a colour."""
+    a, b = QColor(c1), QColor(c2)
+    r = round(a.red()   + (b.red()   - a.red())   * t)
+    g = round(a.green() + (b.green() - a.green()) * t)
+    bl = round(a.blue()  + (b.blue()  - a.blue())  * t)
+    return f"#{r:02x}{g:02x}{bl:02x}"
 
 
 def _status_color(status: str) -> str:
@@ -427,6 +438,16 @@ class NodeCard(QFrame):
 
         outer.addStretch(1)
 
+        # In-card detail strip — replaces relying on the ring's native
+        # QToolTip, which is theme-blind, only appears over the small ring
+        # itself, and is easy to miss. Hidden until the card is hovered.
+        self._detail_strip = None
+        if not is_bucket:
+            self._detail_strip = QLabel("")
+            self._detail_strip.setWordWrap(True)
+            self._detail_strip.hide()
+            outer.addWidget(self._detail_strip)
+
         footer = QHBoxLayout()
         self.pods_lbl = QLabel("")
         footer.addWidget(self.pods_lbl)
@@ -437,6 +458,26 @@ class NodeCard(QFrame):
             self.pressure_lbl.hide()
         footer.addWidget(self.pressure_lbl)
         outer.addLayout(footer)
+
+        self.setAttribute(Qt.WA_Hover, True)
+        self._cpu_detail = self._mem_detail = ""
+
+        # Smooth hover "lift": a drop shadow that deepens plus a real few-
+        # pixel rise, driven by one QVariantAnimation (0 = rest, 1 =
+        # hovered) instead of the old instant QSS :hover border swap.
+        self._hover_t     = 0.0
+        self._rest_y       = None   # captured from the grid layout's own position
+        self._animating_lift = False
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(10)
+        self._shadow.setOffset(0, 2)
+        self._shadow.setColor(QColor(0, 0, 0, 110))
+        self.setGraphicsEffect(self._shadow)
+
+        self._hover_anim = QVariantAnimation(self)
+        self._hover_anim.setDuration(170)
+        self._hover_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._hover_anim.valueChanged.connect(self._on_hover_step)
 
         self._apply_styles()
 
@@ -454,16 +495,20 @@ class NodeCard(QFrame):
             # Dashed border + muted panel background (rather than the
             # solid border/BG_ITEM real node cards use) at rest — so the
             # "not a real node" signal doesn't depend on hover state.
+            self._border_rest  = T['TEXT_MUTED']
+            self._border_hover = T['TEXT_DIM']
+            self._border_style = "dashed"
             self.setStyleSheet(
                 f"QFrame#node_card {{ background: {T['BG_PANEL']}; "
-                f"border: 1px dashed {T['TEXT_MUTED']}; border-radius: 14px; }} "
-                f"QFrame#node_card:hover {{ border: 1px dashed {T['TEXT_DIM']}; }}"
+                f"border: 1px dashed {self._border_rest}; border-radius: 14px; }}"
             )
         else:
+            self._border_rest  = T['BORDER']
+            self._border_hover = T['ACCENT']
+            self._border_style = "solid"
             self.setStyleSheet(
                 f"QFrame#node_card {{ background: {T['BG_ITEM']}; "
-                f"border: 1px solid {T['BORDER']}; border-radius: 14px; }} "
-                f"QFrame#node_card:hover {{ border: 1px solid {T['ACCENT']}; }}"
+                f"border: 1px solid {self._border_rest}; border-radius: 14px; }}"
             )
         self.name_lbl.setStyleSheet(
             f"color: {T['TEXT_DIM'] if self._is_bucket else T['TEXT_PRIMARY']}; "
@@ -475,9 +520,15 @@ class NodeCard(QFrame):
             cap.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px; font-weight: 600;")
         if self._is_bucket:
             self._blurb_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        if self._detail_strip is not None:
+            self._detail_strip.setStyleSheet(
+                f"background: {T['BG_HOVER']}; color: {T['TEXT_DIM']}; "
+                f"font-size: 11px; border-radius: 8px; padding: 6px 8px;"
+            )
 
     def refresh_theme(self):
         self._apply_styles()
+        self._set_border_color(_lerp_color(self._border_rest, self._border_hover, self._hover_t))
         if self.cpu_ring is not None:
             self.cpu_ring.refresh_theme()
         if self.mem_ring is not None:
@@ -498,16 +549,16 @@ class NodeCard(QFrame):
 
         if cpu_pct is not None:
             self.cpu_ring.setValue(cpu_pct, _pct_color(cpu_pct))
-            self.cpu_ring.setToolTip(cpu_tip or f"CPU usage: {cpu_pct:.1f}%")
+            self._cpu_detail = (cpu_tip or f"CPU usage: {cpu_pct:.1f}%").replace("\n", "  ")
         else:
             self.cpu_ring.setValue(0)
-            self.cpu_ring.setToolTip("CPU usage unavailable")
+            self._cpu_detail = "CPU usage unavailable"
         if mem_pct is not None:
             self.mem_ring.setValue(mem_pct, _pct_color(mem_pct))
-            self.mem_ring.setToolTip(mem_tip or f"Memory usage: {mem_pct:.1f}%")
+            self._mem_detail = (mem_tip or f"Memory usage: {mem_pct:.1f}%").replace("\n", "  ")
         else:
             self.mem_ring.setValue(0)
-            self.mem_ring.setToolTip("Memory usage unavailable")
+            self._mem_detail = "Memory usage unavailable"
 
         self.pods_lbl.setText(f"📦  {pod_count} pod(s)")
         self.pressure_lbl.setText(pressure_text or "")
@@ -525,6 +576,63 @@ class NodeCard(QFrame):
     def mouseDoubleClickEvent(self, event):
         self.doubleClicked.emit(self.node_name)
         super().mouseDoubleClickEvent(event)
+
+    LIFT_PX = 7  # how many px the card rises at full hover
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        # The grid layout is what actually owns this widget's position
+        # (initial placement, _rescale_node_cards, _reflow_node_grid).
+        # Whenever it moves the card for a real reason we record that as
+        # the new "rest" y — but ignore moves we triggered ourselves from
+        # _on_hover_step, or the lift offset would get baked in as rest.
+        if not self._animating_lift:
+            self._rest_y = self.y()
+
+    def enterEvent(self, event):
+        if self._detail_strip is not None:
+            text = "   ·   ".join(t for t in (self._cpu_detail, self._mem_detail) if t)
+            if text:
+                self._detail_strip.setText(text)
+                self._detail_strip.show()
+        self._animate_hover(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._detail_strip is not None:
+            self._detail_strip.hide()
+        self._animate_hover(0.0)
+        super().leaveEvent(event)
+
+    def _animate_hover(self, target: float):
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover_t)
+        self._hover_anim.setEndValue(target)
+        self._hover_anim.start()
+
+    def _set_border_color(self, color: str):
+        self.setStyleSheet(
+            f"QFrame#node_card {{ background: {T['BG_PANEL'] if self._is_bucket else T['BG_ITEM']}; "
+            f"border: 1px {self._border_style} {color}; border-radius: 14px; }}"
+        )
+
+    def _on_hover_step(self, value):
+        self._hover_t = value
+        if self._rest_y is None:
+            self._rest_y = self.y()
+
+        # Rise a few px toward the hovered state and deepen the shadow to
+        # match — the two together read as the card lifting off the page
+        # rather than just its border changing colour.
+        self._animating_lift = True
+        self.move(self.x(), self._rest_y - round(self.LIFT_PX * value))
+        self._animating_lift = False
+
+        self._shadow.setBlurRadius(10 + 26 * value)
+        self._shadow.setOffset(0, 2 + 10 * value)
+        self._shadow.setColor(QColor(0, 0, 0, round(110 + 90 * value)))
+
+        self._set_border_color(_lerp_color(self._border_rest, self._border_hover, value))
 
 
 class _NodeGridContainer(QWidget):
@@ -563,6 +671,11 @@ class DashboardTab(QWidget):
         # keyed by node name. Rebuilt from scratch on every refresh (same
         # clear-then-repopulate approach the old table used).
         self._node_cards = {}
+        # (row, col) each card currently occupies — lets _reflow_node_grid
+        # skip re-adding cards whose slot hasn't actually changed, so a
+        # mid-hover lift animation doesn't get reset by an unrelated
+        # refresh tick.
+        self._card_grid_pos = {}
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -818,6 +931,7 @@ class DashboardTab(QWidget):
             if w is not None:
                 w.deleteLater()
         self._node_cards = {}
+        self._card_grid_pos = {}
 
     def _current_card_side(self) -> int:
         """Square side length that makes NODE_GRID_COLS cards, plus the
@@ -848,6 +962,7 @@ class DashboardTab(QWidget):
         row, col = divmod(idx, self.NODE_GRID_COLS)
         self.k8s_grid.addWidget(card, row, col + 1)
         self._node_cards[node_name] = card
+        self._card_grid_pos[node_name] = (row, col)
         return card
 
     def _get_or_create_node_card(self, node_name: str, is_bucket: bool = False) -> NodeCard:
@@ -885,22 +1000,20 @@ class DashboardTab(QWidget):
         for name in list(self._node_cards.keys()):
             if name not in order_set:
                 card = self._node_cards.pop(name)
+                self._card_grid_pos.pop(name, None)
                 self.k8s_grid.removeWidget(card)
                 card.deleteLater()
-
-        # Detach the survivors so they can be re-placed in the right order
-        # (a no-op position-wise for the common case where nothing moved).
-        for name in order:
-            card = self._node_cards.get(name)
-            if card is not None:
-                self.k8s_grid.removeWidget(card)
 
         for idx, name in enumerate(order):
             card = self._node_cards.get(name)
             if card is None:
                 continue
             row, col = divmod(idx, self.NODE_GRID_COLS)
+            if self._card_grid_pos.get(name) == (row, col):
+                continue  # already sitting in the right cell — leave it alone
+            self.k8s_grid.removeWidget(card)
             self.k8s_grid.addWidget(card, row, col + 1)
+            self._card_grid_pos[name] = (row, col)
 
     def _apply_styles(self):
         self.ctrl_bar.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")

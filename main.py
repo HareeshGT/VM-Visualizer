@@ -15,7 +15,7 @@ Imports:
 
 import sys
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QStyleFactory
 from PyQt5.QtGui import QColor, QPalette
 
 from themes import T, CURRENT_THEME, build_qss, apply_theme_vars
@@ -47,6 +47,16 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("EC2 Manager")
     app.setOrganizationName("EC2Manager")
+
+    # On macOS, Qt's native 'macos' style renders combo-box and menu popups
+    # through the OS itself and ignores most QAbstractItemView QSS (dark
+    # background, rounded row highlight, custom fonts) — the popup falls
+    # back to a plain system list no matter what build_qss() says. Fusion
+    # is a full Qt-drawn style, so every themed popup (namespace picker,
+    # sort/config combos, right-click menus) renders identically to the
+    # rest of the themed app on macOS, Windows, and Linux alike.
+    if "Fusion" in QStyleFactory.keys():
+        app.setStyle(QStyleFactory.create("Fusion"))
 
     # Apply the theme that was loaded from saved settings at import time.
     # (themes.py already called apply_theme_vars() on import, so T is populated.)

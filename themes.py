@@ -154,14 +154,22 @@ def build_qss() -> str:
         selection-background-color: {c['ACCENT']};
     }}
     QLineEdit:focus {{ border-color: {c['ACCENT']}; }}
+    /* Pill-shaped combo box — matches the rounded strip look ThemePicker
+    already established, instead of the old flat square box, so every
+    dropdown in the app (namespace picker, sort, config type, …) reads as
+    one consistent control language. */
     QComboBox {{
         background: {c['BG_ITEM']}; color: {c['TEXT_PRIMARY']};
-        border: 1px solid {c['BORDER']}; border-radius: 8px; padding: 5px 12px; min-width: 120px;
+        border: 1px solid {c['BORDER']}; border-radius: 15px; padding: 6px 14px; min-width: 120px;
     }}
-    QComboBox:hover {{ border-color: {c['TEXT_MUTED']}; }}
-    QComboBox:focus {{ border-color: {c['ACCENT']}; }}
-    QComboBox::drop-down {{ border: none; width: 26px; }}
-    QComboBox::down-arrow {{ color: {c['TEXT_DIM']}; }}
+    QComboBox:hover {{ border-color: {c['TEXT_MUTED']}; background: {c['BG_HOVER']}; }}
+    QComboBox:focus {{ border: 1px solid {c['ACCENT']}; }}
+    QComboBox::drop-down {{
+        border: none; width: 28px; margin-right: 3px;
+    }}
+    QComboBox::down-arrow {{
+        width: 9px; height: 9px;
+    }}
     /* Popup list shown when any QComboBox is opened (namespace picker, sort,
     exec mode, interpreter, config type, …) — styled once here so every
     dropdown in the app gets the same polished look.
