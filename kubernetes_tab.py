@@ -14,13 +14,14 @@ from PyQt5.QtWidgets import (
     QMenu,
 )
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess, QSize
 from PyQt5.QtGui import QColor, QFont, QFontDatabase
 from PyQt5.QtWidgets import QCompleter
 
 from themes import T, apply_qss_to
 from workers import CommandWorker, track_worker
 from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog
+from k8s_cards import PodCardWidget, DeploymentCardWidget
 from utils import (
     append_terminal_html, append_terminal_text,
     load_tunnel_services, REMOTE_TUNNEL_CSV_PATH,
@@ -242,31 +243,24 @@ class KubernetesTab(QWidget):
         lay.addWidget(tb_widget)
         self.pods_toolbar = tb_widget
 
-        self.pod_tree = QTreeWidget()
-        font = self.pod_tree.font()
-        font.setPointSize(14)   # Try 13 or 14 if needed
-        self.pod_tree.setFont(font)
-        self._style_tree(self.pod_tree)
-
-        self.pod_tree.setRootIsDecorated(False)
-        self.pod_tree.setAlternatingRowColors(True)
-        self.pod_tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.pod_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.pod_tree.customContextMenuRequested.connect(self._pod_ctx_menu)
-        self.pod_tree.itemDoubleClicked.connect(self._on_pod_double_click)
-        self.pod_tree.setColumnCount(9)
-        self.pod_tree.setHeaderLabels(
-            ["Namespace", "Name", "Ready", "Status", "Restarts", "Last Restart", "Age", "IP", "Node"]
+        # Pods render as cards (see k8s_cards.py) rather than table rows —
+        # each card carries its own meta dict via Qt.UserRole, the same
+        # "meta dict + setItemWidget()" pattern file_widgets.py already uses
+        # for the file list. Namespace is folded into a chip on the card
+        # itself (only shown in "(all namespaces)" view) instead of a
+        # dedicated hidden column.
+        self.pod_list = QListWidget()
+        self.pod_list.setSpacing(6)
+        self.pod_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.pod_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.pod_list.customContextMenuRequested.connect(self._pod_ctx_menu)
+        self.pod_list.itemDoubleClicked.connect(self._on_pod_double_click)
+        self.pod_list.currentItemChanged.connect(self._on_pod_selection_changed)
+        self.pod_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
         )
-        hdr = self.pod_tree.header()
-        for i in range(9):
-            hdr.setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)   # Name gets the extra room
-        # Namespace column is only meaningful in "(all namespaces)" view — when a
-        # specific namespace is selected every row would repeat the same value, so
-        # we hide the column and let the ns_combo above speak for itself instead.
-        self.pod_tree.setColumnHidden(0, True)
-        lay.addWidget(self.pod_tree)
+        lay.addWidget(self.pod_list)
         self.sub_tabs.addTab(w, "🐳  Pods")
 
     def _build_deployments_tab(self):
@@ -311,25 +305,18 @@ class KubernetesTab(QWidget):
         lay.addWidget(tb_widget)
         self.deploy_toolbar = tb_widget
 
-        self.deploy_tree = QTreeWidget()
-        self._style_tree(self.deploy_tree)
-        self.deploy_tree.setRootIsDecorated(False)
-        self.deploy_tree.setAlternatingRowColors(True)
-        self.deploy_tree.setColumnCount(7)
-        self.deploy_tree.setHeaderLabels(["Namespace", "Name", "Ready", "Up-to-date", "Available", "Age", "Images"])
-        hdr = self.deploy_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(6, QHeaderView.Stretch)
-        for i in range(2, 6):
-            hdr.setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        # Namespace column is only meaningful in "(all namespaces)" view — when a
-        # specific namespace is selected every row would repeat the same value, so
-        # we hide the column and let the ns_combo above speak for itself instead.
-        self.deploy_tree.setColumnHidden(0, True)
-        self.deploy_tree.itemClicked.connect(self._on_deploy_click)
-        self.deploy_tree.itemDoubleClicked.connect(self._on_deploy_double_click)
-        lay.addWidget(self.deploy_tree)
+        # Same card-list treatment as Pods — see k8s_cards.py.
+        self.deploy_list = QListWidget()
+        self.deploy_list.setSpacing(6)
+        self.deploy_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.deploy_list.itemClicked.connect(self._on_deploy_click)
+        self.deploy_list.itemDoubleClicked.connect(self._on_deploy_double_click)
+        self.deploy_list.currentItemChanged.connect(self._on_deploy_selection_changed)
+        self.deploy_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.deploy_list)
         self.sub_tabs.addTab(w, "🚀  Deployments")
 
     def _build_services_tab(self):
@@ -695,6 +682,11 @@ class KubernetesTab(QWidget):
             )
         if self.ssh:
             self._check_cluster_health()
+            # Pod/deployment cards (k8s_cards.py) bake T's colors in at
+            # construction time rather than re-reading them live, so a
+            # theme switch needs a rebuild of whichever list is on screen
+            # for its cards to pick up the new palette.
+            self._refresh_current_tab()
 
     def _style_tree(self, tree):
         font = monospace_font(13)
@@ -795,8 +787,8 @@ class KubernetesTab(QWidget):
         self._refresh_current_tab()
 
     def _clear_all(self):
-        self.pod_tree.clear()
-        self.deploy_tree.clear()
+        self.pod_list.clear()
+        self.deploy_list.clear()
         self.svc_tree.clear()
         self.ing_tree.clear()
         self.cfg_list.clear()
@@ -855,11 +847,11 @@ class KubernetesTab(QWidget):
         self._run_cmd(f"kubectl get pods {self._ns_flag()} -o wide 2>&1", self._populate_pods)
 
     def _populate_pods(self, out: str):
-        self.pod_tree.clear()
+        self.pod_list.clear()
         all_ns = (self._current_ns == "(all namespaces)")
-        # Only show the Namespace column when it's actually meaningful (i.e. rows
-        # can differ). When one namespace is selected, it's implied by ns_combo.
-        self.pod_tree.setColumnHidden(0, not all_ns)
+        # The namespace chip on each card is only shown in "(all namespaces)"
+        # view (i.e. rows can differ) — when one namespace is selected it's
+        # implied by ns_combo already, so the chip would just repeat itself.
         for line in out.strip().splitlines()[1:]:
             parts, last_restart = self._split_pod_line(line)
             if all_ns:
@@ -876,18 +868,16 @@ class KubernetesTab(QWidget):
                 name, ready, status, restarts, age = parts[:5]
                 ip   = parts[5] if len(parts) > 5 else "-"
                 node = parts[6] if len(parts) > 6 else "-"
-            item = QTreeWidgetItem(
-                [ns, name, ready, status, restarts, last_restart or "-", age, ip, node]
-            )
-            s = status.lower()
-            if "running" in s:
-                item.setForeground(3, QColor(T['SUCCESS']))
-            elif "pending" in s or "init" in s:
-                item.setForeground(3, QColor(T['WARNING']))
-            elif any(x in s for x in ("error", "crash", "fail", "evict")):
-                item.setForeground(3, QColor(T['DANGER']))
-            item.setFont(1, monospace_font(11))
-            self.pod_tree.addTopLevelItem(item)
+            meta = {
+                "namespace": ns, "name": name, "ready": ready, "status": status,
+                "restarts": restarts, "last_restart": last_restart or "-",
+                "age": age, "ip": ip, "node": node,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, PodCardWidget.CARD_HEIGHT))
+            self.pod_list.addItem(item)
+            self.pod_list.setItemWidget(item, PodCardWidget(meta, all_ns))
         # Refreshing rebuilds every row from scratch, which would otherwise
         # silently show everything again even though the filter box still
         # has text in it — reapply whatever's currently typed there.
@@ -895,32 +885,40 @@ class KubernetesTab(QWidget):
 
     def _filter_pods(self, text: str):
         q = text.lower()
-        for i in range(self.pod_tree.topLevelItemCount()):
-            item = self.pod_tree.topLevelItem(i)
-            item.setHidden(q not in item.text(1).lower())
+        for i in range(self.pod_list.count()):
+            item = self.pod_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
 
     def _selected_pod(self) -> tuple:  # (Optional[str], str)
-        item = self.pod_tree.currentItem()
+        item = self.pod_list.currentItem()
         if not item:
             QMessageBox.warning(self, "No selection", "Select a pod first.")
             return None, ""
-        # In "(all namespaces)" view each row carries its own real namespace;
-        # otherwise fall back to whatever's selected in ns_combo.
-        ns = item.text(0) if self._current_ns == "(all namespaces)" else self._current_ns
-        if not ns or ns == "(all namespaces)":
-            ns = "default"
-        return item.text(1), ns
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
 
-    def _on_pod_double_click(self, item, column=0):
-        """Double-clicking a pod row is a shortcut for Describe — reads
-        name/namespace off the row that was actually double-clicked rather
+    def _on_pod_double_click(self, item):
+        """Double-clicking a pod card is a shortcut for Describe — reads
+        name/namespace off the card that was actually double-clicked rather
         than relying on _selected_pod()'s currentItem(), since a
         double-click's second press is what sets the current item and
         there's no reason to depend on that timing."""
-        ns = item.text(0) if self._current_ns == "(all namespaces)" else self._current_ns
-        if not ns or ns == "(all namespaces)":
-            ns = "default"
-        self._describe("pod", item.text(1), ns)
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("pod", meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_pod_selection_changed(self, current, previous):
+        """Cards paint their own selected state (they fully cover the
+        QListWidgetItem's rect, so the list's native selection styling
+        never shows through) — forward selection changes into them."""
+        if previous is not None:
+            w = self.pod_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.pod_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
 
     def _pod_logs(self):
         pod, ns = self._selected_pod()
@@ -948,20 +946,20 @@ class KubernetesTab(QWidget):
                           lambda o: (self._log(o), self._load_pods()))
 
     def _pod_ctx_menu(self, pos):
-        item = self.pod_tree.itemAt(pos)
+        item = self.pod_list.itemAt(pos)
         if not item:
             return
-        pod = item.text(1)
-        ns  = item.text(0) if self._current_ns == "(all namespaces)" else self._current_ns
-        if not ns or ns == "(all namespaces)":
-            ns = "default"
+        self.pod_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        pod  = meta.get("name")
+        ns   = meta.get("namespace") or "default"
         menu = QMenu(self)
         menu.addAction("📋  View Logs",  lambda: LogViewerDialog(self, self.ssh, ns, pod).exec_())
         menu.addAction("💻  Exec Shell", lambda: ExecDialog(self, self.ssh, ns, pod).exec_())
         menu.addAction("📄  Describe",   lambda: self._describe("pod", pod, ns))
         menu.addSeparator()
         menu.addAction("🗑  Delete", self._pod_delete)
-        menu.exec_(self.pod_tree.viewport().mapToGlobal(pos))
+        menu.exec_(self.pod_list.viewport().mapToGlobal(pos))
 
     # ── Deployments ───────────────────────────────────────────
     def _load_deployments(self):
@@ -969,9 +967,8 @@ class KubernetesTab(QWidget):
                       self._populate_deployments)
 
     def _populate_deployments(self, out: str):
-        self.deploy_tree.clear()
+        self.deploy_list.clear()
         all_ns = (self._current_ns == "(all namespaces)")
-        self.deploy_tree.setColumnHidden(0, not all_ns)
         for line in out.strip().splitlines()[1:]:
             parts = line.split()
             if all_ns:
@@ -989,47 +986,59 @@ class KubernetesTab(QWidget):
                 ns = self._current_ns or "default"
                 name, ready, upd, avail, age = parts[:5]
                 imgs = " | ".join(parts[5:]) if len(parts) > 5 else "-"
-            item = QTreeWidgetItem([ns, name, ready, upd, avail, age, imgs])
-            item.setFont(1, monospace_font(11))
-            try:
-                cur, desired = ready.split("/")
-                item.setForeground(2, QColor(T['SUCCESS'] if cur == desired else T['WARNING']))
-            except Exception:
-                pass
-            self.deploy_tree.addTopLevelItem(item)
+            meta = {
+                "namespace": ns, "name": name, "ready": ready,
+                "up_to_date": upd, "available": avail, "age": age, "images": imgs,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, DeploymentCardWidget.CARD_HEIGHT))
+            self.deploy_list.addItem(item)
+            self.deploy_list.setItemWidget(item, DeploymentCardWidget(meta, all_ns))
         # Same reasoning as _populate_pods: rebuild wipes the visual filter
         # state even though the filter box still has text — reapply it.
         self._filter_deployments(self.deploy_filter.text())
 
     def _on_deploy_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
         try:
-            _, desired = item.text(2).split("/")
+            _, desired = meta.get("ready", "").split("/")
             self.scale_spin.setValue(int(desired))
         except Exception:
             pass
 
-    def _on_deploy_double_click(self, item, column=0):
-        """Double-clicking a deployment row is a shortcut for Describe —
-        reads name/namespace off the row that was actually double-clicked,
+    def _on_deploy_double_click(self, item):
+        """Double-clicking a deployment card is a shortcut for Describe —
+        reads name/namespace off the card that was actually double-clicked,
         same reasoning as _on_pod_double_click above."""
-        all_ns = (self._current_ns == "(all namespaces)")
-        ns = item.text(0) if all_ns else (self._current_ns or "default")
-        self._describe("deployment", item.text(1), ns)
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("deployment", meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_deploy_selection_changed(self, current, previous):
+        """Same reasoning as _on_pod_selection_changed above."""
+        if previous is not None:
+            w = self.deploy_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.deploy_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
 
     def _filter_deployments(self, text: str):
         q = text.lower()
-        for i in range(self.deploy_tree.topLevelItemCount()):
-            item = self.deploy_tree.topLevelItem(i)
-            item.setHidden(q not in item.text(1).lower())
+        for i in range(self.deploy_list.count()):
+            item = self.deploy_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
 
     def _selected_deploy(self) -> tuple:  # (Optional[str], str)
-        item = self.deploy_tree.currentItem()
+        item = self.deploy_list.currentItem()
         if not item:
             QMessageBox.warning(self, "No selection", "Select a deployment first.")
             return None, ""
-        all_ns = (self._current_ns == "(all namespaces)")
-        ns = item.text(0) if all_ns else (self._current_ns or "default")
-        return item.text(1), ns
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
 
     def _deploy_scale(self):
         dep, ns = self._selected_deploy()
