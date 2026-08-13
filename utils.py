@@ -203,13 +203,6 @@ def append_terminal_text(widget, text: str, point_size: int = 11):
     widget.setTextCursor(cursor)
     widget.ensureCursorVisible()
 
-
-# ─── Port-tunnel service list ─────────────────────────────────
-# Local fallback path (kept for any code that still wants a purely local
-# CSV). The app's actual tunnel-service list lives on the connected VM —
-# see REMOTE_TUNNEL_CSV_PATH / load_tunnel_services below.
-TUNNEL_CSV_PATH = os.path.join(APP_DIR, "tunnel_services.csv")
-
 # Default path of the CSV on the connected VM describing tunnelable
 # services. Each row:
 #   service_name, local_port, container_port, namespace
