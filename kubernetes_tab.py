@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import QCompleter
 
 from themes import T, apply_qss_to, load_settings, save_settings
 from workers import CommandWorker, track_worker
-from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog
+from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog, ContainerPickerDialog
 from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
@@ -1127,7 +1127,28 @@ class KubernetesTab(QWidget):
     def _pod_exec(self):
         pod, ns = self._selected_pod()
         if pod:
-            ExecDialog(self, self.ssh, ns, pod).exec_()
+            self._exec_pod(pod, ns)
+
+    def _exec_pod(self, pod: str, ns: str):
+        """Look up the pod's container names before opening ExecDialog —
+        see ContainerPickerDialog's docstring for why. Single-container
+        pods (the common case) skip straight to ExecDialog with no extra
+        click."""
+        self._run_cmd(
+            f"kubectl get pod -n {ns} {pod} "
+            f"-o jsonpath='{{.spec.containers[*].name}}' 2>&1",
+            lambda out, pod=pod, ns=ns: self._on_exec_containers_fetched(out, pod, ns),
+        )
+
+    def _on_exec_containers_fetched(self, out: str, pod: str, ns: str):
+        # Same trailing-quote defensiveness as _populate_namespaces.
+        containers = out.strip().strip("'").split()
+        if len(containers) <= 1:
+            ExecDialog(self, self.ssh, ns, pod, containers[0] if containers else None).exec_()
+            return
+        dlg = ContainerPickerDialog(self, pod, containers)
+        if dlg.exec_() == QDialog.Accepted:
+            ExecDialog(self, self.ssh, ns, pod, dlg.selected_container()).exec_()
 
     def _pod_delete(self):
         pod, ns = self._selected_pod()
@@ -1154,7 +1175,7 @@ class KubernetesTab(QWidget):
         ns   = meta.get("namespace") or "default"
         menu = QMenu(self)
         menu.addAction("📋  View Logs",  lambda: LogViewerDialog(self, self.ssh, ns, pod).exec_())
-        menu.addAction("💻  Exec Shell", lambda: ExecDialog(self, self.ssh, ns, pod).exec_())
+        menu.addAction("💻  Exec Shell", lambda: self._exec_pod(pod, ns))
         menu.addAction("📄  Describe",   lambda: self._describe("pod", pod, ns))
         menu.addSeparator()
         menu.addAction("🗑  Delete", self._pod_delete)
