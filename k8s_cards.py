@@ -203,6 +203,41 @@ class DeploymentCardWidget(_CardBase):
         outer.addLayout(bottom)
 
 
+class ConfigCardWidget(_CardBase):
+    """One ConfigMap or Secret, as a card, for the Config & Secrets list.
+    `meta` = {"name": str, "type": "configmap" | "secret"}.
+
+    Replaces the old bare QListWidgetItem(name) rows — those had no icon,
+    no breathing room between entries, and nothing visually distinguishing
+    a Secret (sensitive) from a ConfigMap (plain), which is what made the
+    list read as one dense, uniform column of text."""
+
+    CARD_HEIGHT = 52
+
+    def __init__(self, meta: dict, parent=None):
+        is_secret = meta.get("type") == "secret"
+        accent = T["WARNING"] if is_secret else T["INFO"]
+        super().__init__(accent, parent)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(14, 0, 14, 0)
+        outer.setSpacing(10)
+
+        icon_lbl = QLabel("🔐" if is_secret else "📦")
+        icon_lbl.setStyleSheet("font-size: 17px; background: transparent;")
+        outer.addWidget(icon_lbl)
+
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; background: transparent;")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        outer.addWidget(name_lbl, 1)
+
+        outer.addWidget(_pill("Secret" if is_secret else "ConfigMap",
+                               "WARNING" if is_secret else "INFO"))
+
+
 # ── Shared helpers ──────────────────────────────────────────────
 def _ratio_ok(ready: str) -> bool:
     try:

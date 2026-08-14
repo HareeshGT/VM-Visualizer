@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import QCompleter
 from themes import T, apply_qss_to
 from workers import CommandWorker, track_worker
 from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog
-from k8s_cards import PodCardWidget, DeploymentCardWidget
+from k8s_cards import PodCardWidget, DeploymentCardWidget, ConfigCardWidget
 from utils import (
     append_terminal_html, append_terminal_text,
     load_tunnel_services, REMOTE_TUNNEL_CSV_PATH,
@@ -99,16 +99,29 @@ class KubernetesTab(QWidget):
         cb.setContentsMargins(12, 0, 12, 0)
         cb.setSpacing(10)
 
-        ns_row = QHBoxLayout()
-        ns_row.setSpacing(8)
+        # Namespace picker, grouped into one rounded "chip" (dot + label +
+        # combo sharing a pill background) instead of three bare widgets
+        # floating loose on the toolbar — reads as a single catchy control
+        # rather than a thin, easy-to-miss dropdown.
+        self.ns_group = QWidget()
+        self.ns_group.setObjectName("ns_group")
+        self.ns_group.setFixedHeight(40)
+        ns_row = QHBoxLayout(self.ns_group)
+        ns_row.setContentsMargins(14, 0, 8, 0)
+        ns_row.setSpacing(9)
         self.ns_dot = QLabel("●")
-        self.ns_dot.setStyleSheet(f"color: {T['ACCENT']}; font-size: 9px;")
+        self.ns_dot.setStyleSheet(f"color: {T['ACCENT']}; font-size: 11px; background: transparent;")
         ns_row.addWidget(self.ns_dot)
-        ns_lbl = QLabel("Namespace")
-        ns_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        ns_lbl = QLabel("NAMESPACE")
+        ns_lbl.setStyleSheet(
+            f"color: {T['TEXT_DIM']}; font-size: 11px; font-weight: 700; "
+            f"letter-spacing: 0.5px; background: transparent;"
+        )
         ns_row.addWidget(ns_lbl)
         self.ns_combo = QComboBox()
-        self.ns_combo.setMinimumWidth(170)
+        self.ns_combo.setObjectName("ns_combo")
+        self.ns_combo.setMinimumWidth(190)
+        self.ns_combo.setFixedHeight(30)
         self.ns_combo.setMaxVisibleItems(12)
         self.ns_combo.setEditable(True)
         self.ns_combo.setInsertPolicy(QComboBox.NoInsert)
@@ -116,7 +129,8 @@ class KubernetesTab(QWidget):
         self.ns_combo.completer().setFilterMode(Qt.MatchContains)
         self.ns_combo.currentTextChanged.connect(self._on_ns_change)
         ns_row.addWidget(self.ns_combo)
-        cb.addLayout(ns_row)
+        self._style_ns_group()
+        cb.addWidget(self.ns_group)
         cb.addWidget(self._vline())
 
         self.refresh_btn = self._toolbar_btn("↺  Refresh")
@@ -169,6 +183,27 @@ class KubernetesTab(QWidget):
         f.setStyleSheet(f"color: {T['BORDER']};")
         f.setFixedWidth(1)
         return f
+
+    def _style_ns_group(self):
+        """Pill chip around the namespace picker + a bigger, bolder combo
+        box than the app-wide default. Set directly on the two widgets
+        (rather than in themes.py's global QComboBox rule) so every other
+        dropdown in the app keeps its normal size — only this one, the
+        most-used control on the tab, gets the larger treatment. Re-called
+        from apply_theme() on every theme switch since the colours below
+        are baked in as literal hex at call time."""
+        self.ns_group.setStyleSheet(
+            f"QWidget#ns_group {{ background: {T['BG_ITEM']}; "
+            f"border: 1px solid {T['BORDER']}; border-radius: 20px; }}"
+        )
+        self.ns_combo.setStyleSheet(
+            f"QComboBox#ns_combo {{ background: {T['BG_PANEL']}; color: {T['TEXT_PRIMARY']}; "
+            f"border: 1.5px solid {T['ACCENT']}; border-radius: 15px; "
+            f"padding: 2px 30px 2px 14px; font-size: 13px; font-weight: 600; min-width: 190px; }}"
+            f"QComboBox#ns_combo:hover {{ border-color: {T['ACCENT2']}; background: {T['BG_HOVER']}; }}"
+            f"QComboBox#ns_combo::drop-down {{ border: none; width: 26px; }}"
+            f"QComboBox#ns_combo::down-arrow {{ width: 10px; height: 10px; }}"
+        )
 
     def _toolbar_btn(self, label: str, object_name: str = None, tooltip: str = "") -> QPushButton:
         """Build a toolbar action button with a uniform, fixed shape.
@@ -409,32 +444,65 @@ class KubernetesTab(QWidget):
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
 
-        # Left: type selector + list
+        # Left: type toggle + list
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(0)
 
+        # Taller toolbar with real breathing room — the old 42px bar packed
+        # a combo box and filter field edge-to-edge with almost no margin,
+        # which is most of what read as "congested".
         self.cfg_type_bar = QWidget()
-        self.cfg_type_bar.setFixedHeight(42)
+        self.cfg_type_bar.setFixedHeight(58)
         self.cfg_type_bar.setStyleSheet(
             f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
         )
         tb_lay = QHBoxLayout(self.cfg_type_bar)
-        tb_lay.setContentsMargins(10, 0, 10, 0)
-        tb_lay.setSpacing(8)
-        self.cfg_type_combo = QComboBox()
-        self.cfg_type_combo.addItems(["ConfigMaps", "Secrets"])
-        self.cfg_type_combo.currentTextChanged.connect(self._load_config_resources)
-        tb_lay.addWidget(self.cfg_type_combo)
+        tb_lay.setContentsMargins(12, 10, 12, 10)
+        tb_lay.setSpacing(10)
+
+        # ConfigMaps/Secrets is a binary choice, not a long list — a
+        # segmented two-button toggle reads faster than opening a dropdown
+        # for one of two options, and gives the "big, catchy" control the
+        # namespace picker also got, instead of a thin QComboBox.
+        self.cfg_type_toggle = QWidget()
+        self.cfg_type_toggle.setObjectName("cfg_type_toggle")
+        self.cfg_type_toggle.setFixedHeight(36)
+        toggle_lay = QHBoxLayout(self.cfg_type_toggle)
+        toggle_lay.setContentsMargins(3, 3, 3, 3)
+        toggle_lay.setSpacing(2)
+        self.cfg_type_cm_btn = QPushButton("📦  ConfigMaps")
+        self.cfg_type_secret_btn = QPushButton("🔐  Secrets")
+        for btn in (self.cfg_type_cm_btn, self.cfg_type_secret_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(30)
+            toggle_lay.addWidget(btn)
+        self.cfg_type_cm_btn.setChecked(True)
+        self.cfg_type_cm_btn.clicked.connect(lambda: self._set_cfg_type("ConfigMaps"))
+        self.cfg_type_secret_btn.clicked.connect(lambda: self._set_cfg_type("Secrets"))
+        self._cfg_type = "ConfigMaps"
+        self._style_cfg_toggle()
+        tb_lay.addWidget(self.cfg_type_toggle)
+
         self.cfg_filter = QLineEdit()
         self.cfg_filter.setPlaceholderText("🔍  Filter…")
         self.cfg_filter.textChanged.connect(self._filter_configs)
-        tb_lay.addWidget(self.cfg_filter)
+        tb_lay.addWidget(self.cfg_filter, 1)
         ll.addWidget(self.cfg_type_bar)
 
+        # Cards instead of bare text rows — icon, name, and a ConfigMap/
+        # Secret pill per entry, spaced out like the Pods/Deployments
+        # lists (k8s_cards.py) instead of one dense column of names.
         self.cfg_list = QListWidget()
-        self.cfg_list.itemClicked.connect(self._on_cfg_select)
+        self.cfg_list.setSpacing(6)
+        self.cfg_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.cfg_list.currentItemChanged.connect(self._on_cfg_selection_changed)
+        self.cfg_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 10px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
         ll.addWidget(self.cfg_list)
         splitter.addWidget(left)
 
@@ -445,16 +513,17 @@ class KubernetesTab(QWidget):
         rl.setSpacing(0)
 
         self.cfg_detail_hdr = QLabel("  Data")
-        self.cfg_detail_hdr.setFixedHeight(30)
+        self.cfg_detail_hdr.setFixedHeight(34)
         self.cfg_detail_hdr.setStyleSheet(
             f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
-            f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
+            f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
         )
         rl.addWidget(self.cfg_detail_hdr)
 
         self.cfg_detail = QTreeWidget()
         self._style_tree(self.cfg_detail)
         self.cfg_detail.setRootIsDecorated(False)
+        self.cfg_detail.setAlternatingRowColors(True)
         self.cfg_detail.setColumnCount(2)
         self.cfg_detail.setHeaderLabels(["Key", "Value"])
         self.cfg_detail.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -462,11 +531,11 @@ class KubernetesTab(QWidget):
         rl.addWidget(self.cfg_detail)
 
         self.cfg_raw_lbl = QLabel("  Structured View")
-        self.cfg_raw_lbl.setFixedHeight(30)
+        self.cfg_raw_lbl.setFixedHeight(34)
         self.cfg_raw_lbl.setStyleSheet(
             f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-top: 1px solid {T['BORDER']}; "
-            f"border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
+            f"border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
         )
         rl.addWidget(self.cfg_raw_lbl)
 
@@ -474,12 +543,43 @@ class KubernetesTab(QWidget):
         self.cfg_raw.setReadOnly(True)
         self.cfg_raw.setFont(monospace_font(11))
         self.cfg_raw.setMinimumHeight(220)
+        self.cfg_raw.setStyleSheet(f"padding: 10px; border: none; background: {T['BG_DARK']};")
         rl.addWidget(self.cfg_raw)
 
         splitter.addWidget(right)
-        splitter.setSizes([280, 620])
+        splitter.setSizes([320, 620])
         lay.addWidget(splitter)
         self.sub_tabs.addTab(w, "🔧  Config & Secrets")
+
+    def _style_cfg_toggle(self):
+        """Pill-shaped container + two checkable buttons that look like one
+        segmented control (selected side lit with the accent colour).
+        Re-called from apply_theme() since colours are literal hex here."""
+        self.cfg_type_toggle.setStyleSheet(
+            f"QWidget#cfg_type_toggle {{ background: {T['BG_ITEM']}; "
+            f"border: 1px solid {T['BORDER']}; border-radius: 18px; }}"
+        )
+        btn_css = f"""
+            QPushButton {{
+                background: transparent; color: {T['TEXT_DIM']};
+                border: none; border-radius: 15px; padding: 0 16px;
+                font-size: 12px; font-weight: 700;
+            }}
+            QPushButton:hover:!checked {{ background: {T['BG_HOVER']}; color: {T['TEXT_PRIMARY']}; }}
+            QPushButton:checked {{ background: {T['ACCENT']}; color: white; }}
+        """
+        self.cfg_type_cm_btn.setStyleSheet(btn_css)
+        self.cfg_type_secret_btn.setStyleSheet(btn_css)
+
+    def _set_cfg_type(self, name: str):
+        """Click handler for the ConfigMaps/Secrets segmented toggle —
+        keeps the two buttons mutually exclusive (QPushButton's own
+        setCheckable doesn't do this on its own outside a QButtonGroup)
+        and reloads the list for the newly-selected type."""
+        self._cfg_type = name
+        self.cfg_type_cm_btn.setChecked(name == "ConfigMaps")
+        self.cfg_type_secret_btn.setChecked(name == "Secrets")
+        self._load_config_resources()
 
     def _build_terminal_tab(self):
         w = QWidget()
@@ -658,7 +758,8 @@ class KubernetesTab(QWidget):
             f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
         )
         self.health_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
-        self.ns_dot.setStyleSheet(f"color: {T['ACCENT']}; font-size: 9px;")
+        self.ns_dot.setStyleSheet(f"color: {T['ACCENT']}; font-size: 11px; background: transparent;")
+        self._style_ns_group()
         if hasattr(self, "pod_action_cluster"):
             self.pod_action_cluster.setStyleSheet(
                 f"QFrame#action_cluster {{ background: {T['BG_ITEM']}; border-radius: 8px; }}"
@@ -685,19 +786,27 @@ class KubernetesTab(QWidget):
             f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
             f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
         )
-        for lbl in (getattr(self, "svc_hdr", None), getattr(self, "ing_hdr", None),
-                    getattr(self, "cfg_detail_hdr", None)):
+        for lbl in (getattr(self, "svc_hdr", None), getattr(self, "ing_hdr", None)):
             if lbl is not None:
                 lbl.setStyleSheet(header_style)
+        if getattr(self, "cfg_detail_hdr", None) is not None:
+            self.cfg_detail_hdr.setStyleSheet(
+                f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
+                f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
+            )
         if getattr(self, "cfg_type_bar", None) is not None:
             self.cfg_type_bar.setStyleSheet(
                 f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
             )
+        if getattr(self, "cfg_type_toggle", None) is not None:
+            self._style_cfg_toggle()
+        if getattr(self, "cfg_raw", None) is not None:
+            self.cfg_raw.setStyleSheet(f"padding: 10px; border: none; background: {T['BG_DARK']};")
         if getattr(self, "cfg_raw_lbl", None) is not None:
             self.cfg_raw_lbl.setStyleSheet(
                 f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
                 f"font-weight: 700; border-top: 1px solid {T['BORDER']}; "
-                f"border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
+                f"border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
             )
         if self.ssh:
             self._check_cluster_health()
@@ -1162,7 +1271,7 @@ class KubernetesTab(QWidget):
 
     # ── Config & Secrets ──────────────────────────────────────
     def _load_config_resources(self, _=None):
-        rtype = "configmaps" if self.cfg_type_combo.currentText() == "ConfigMaps" else "secrets"
+        rtype = "configmaps" if self._cfg_type == "ConfigMaps" else "secrets"
         cmd = (
             f"kubectl get {rtype} {self._ns_flag()} "
             f"-o jsonpath='{{range .items[*]}}{{.metadata.name}}\n{{end}}' 2>&1"
@@ -1173,10 +1282,17 @@ class KubernetesTab(QWidget):
         self.cfg_list.clear()
         self.cfg_detail.clear()
         self.cfg_raw.clear()
+        card_type = "configmap" if self._cfg_type == "ConfigMaps" else "secret"
         for name in out.strip().splitlines():
             name = name.strip()
-            if name:
-                self.cfg_list.addItem(QListWidgetItem(name))
+            if not name:
+                continue
+            meta = {"name": name, "type": card_type}
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, ConfigCardWidget.CARD_HEIGHT))
+            self.cfg_list.addItem(item)
+            self.cfg_list.setItemWidget(item, ConfigCardWidget(meta))
         # Same reasoning as _populate_pods: reapply whatever's in the
         # filter box, since the rebuild above doesn't know about it.
         self._filter_configs(self.cfg_filter.text())
@@ -1185,11 +1301,25 @@ class KubernetesTab(QWidget):
         q = text.lower()
         for i in range(self.cfg_list.count()):
             item = self.cfg_list.item(i)
-            item.setHidden(q not in item.text().lower())
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
 
-    def _on_cfg_select(self, item):
-        name  = item.text()
-        rtype = "configmap" if self.cfg_type_combo.currentText() == "ConfigMaps" else "secret"
+    def _on_cfg_selection_changed(self, current, previous):
+        """Same card-selection forwarding as pods/deployments — the card
+        widget owns its own selected-state paint, so the list has to tell
+        it explicitly (see k8s_cards.py's _CardBase docstring)."""
+        if previous is not None:
+            w = self.cfg_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is None:
+            return
+        w = self.cfg_list.itemWidget(current)
+        if w:
+            w.set_selected(True)
+        meta  = current.data(Qt.UserRole) or {}
+        name  = meta.get("name", "")
+        rtype = meta.get("type", "configmap")
         ns    = self._current_ns if self._current_ns != "(all namespaces)" else "default"
         self._run_cmd(f"kubectl get {rtype} {name} -n {ns} -o json 2>&1",
                       lambda o: self._show_cfg_detail(o, rtype))
