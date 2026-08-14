@@ -1,0 +1,14 @@
+# VM Visualizer / EC2 Manager — runtime dependencies
+#
+# PyQt5 (with the Multimedia submodules pulled in by MediaPlayerDialog's
+# use of QtMultimedia/QtMultimediaWidgets in dialogs.py) and paramiko
+# (SSH/SFTP — used throughout main_window.py, sudo_fs.py, workers.py) are
+# the only third-party packages this app imports. Everything else
+# (json, csv, re, threading, subprocess, http.server, etc.) is Python
+# standard library.
+
+PyQt5>=5.15,<6
+paramiko>=3.0
+
+# ── Optional: only needed to build the macOS .app bundle ──
+pyinstaller>=6.0
