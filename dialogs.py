@@ -620,6 +620,45 @@ class LogViewerDialog(QDialog):
 
 
 # ─── K8s exec dialog ─────────────────────────────────────────
+class ContainerPickerDialog(QDialog):
+    """Shown before opening ExecDialog when the target pod has more than
+    one container. kubectl exec silently targets the pod's first
+    container when -c isn't given — harmless for a single-container pod,
+    but easy to exec into the wrong place once a pod has a sidecar
+    (istio-proxy, log shippers, init containers, etc.), so ask instead of
+    guessing whenever there's an actual choice."""
+
+    def __init__(self, parent, pod: str, containers: list):
+        super().__init__(parent)
+        self.setWindowTitle(f"Select Container — {pod}")
+        apply_qss_to(self)
+        self.setMinimumWidth(340)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        info = QLabel(f'"{pod}" has {len(containers)} containers — pick one to exec into:')
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        layout.addWidget(info)
+
+        self.combo = QComboBox()
+        self.combo.addItems(containers)
+        layout.addWidget(self.combo)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = bb.button(QDialogButtonBox.Ok)
+        ok_btn.setObjectName("primary")
+        ok_btn.setText("Exec")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+    def selected_container(self) -> str:
+        return self.combo.currentText()
+
+
 class ExecDialog(QDialog):
     def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
         super().__init__(parent)
