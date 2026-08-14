@@ -140,7 +140,7 @@ class KubernetesTab(QWidget):
         self.kubectl_inp.returnPressed.connect(self._run_kubectl)
         cb.addWidget(self.kubectl_inp)
 
-        self.run_btn = self._toolbar_btn("Run", object_name="primary")
+        self.run_btn = self._toolbar_btn("Run")
         self.run_btn.clicked.connect(self._run_kubectl)
         cb.addWidget(self.run_btn)
         root.addWidget(self.ctrl_bar)
@@ -313,7 +313,7 @@ class KubernetesTab(QWidget):
             ("📋  Describe", "dep_desc_btn",    self._deploy_describe),
             ("🗑  Delete",   "dep_del_btn",     self._deploy_delete),
         ]:
-            obj_name = "danger" if "Delete" in label else ("primary" if "Scale" in label else None)
+            obj_name = "danger" if "Delete" in label else ("primary" if "" in label else None)
             btn = self._toolbar_btn(label, object_name=obj_name)
             setattr(self, obj, btn)
             btn.clicked.connect(slot)
@@ -534,7 +534,6 @@ class KubernetesTab(QWidget):
 
         manage_btn = self._toolbar_btn(
             "⚙️  Manage Services",
-            object_name="primary",
             tooltip="Add, edit, or remove tunnel services stored on the connected VM",
         )
         manage_btn.clicked.connect(self._open_manage_tunnel_services)
