@@ -203,6 +203,107 @@ class DeploymentCardWidget(_CardBase):
         outer.addLayout(bottom)
 
 
+def _svc_type_color_key(stype: str) -> str:
+    s = (stype or "").lower()
+    if s == "loadbalancer":
+        return "ACCENT2"
+    if s == "nodeport":
+        return "INFO"
+    if s == "externalname":
+        return "WARNING"
+    return "TEXT_MUTED"  # ClusterIP — the default, unremarkable case
+
+
+class ServiceCardWidget(_CardBase):
+    """One Service, as a card. `meta` matches what _populate_services builds:
+    namespace, name, type, cluster_ip, external_ip, ports, age."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        stype = meta.get("type", "") or "ClusterIP"
+        super().__init__(T.get(_svc_type_color_key(stype), T["TEXT_MUTED"]), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        top.addWidget(_pill(stype, _svc_type_color_key(stype)))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        bottom.addWidget(_meta_label(f"Cluster-IP {meta.get('cluster_ip', '-') or '-'}"))
+        bottom.addWidget(_meta_label(f"External-IP {meta.get('external_ip', '-') or '-'}"))
+
+        ports_lbl = _meta_label(meta.get("ports", "-") or "-")
+        ports_lbl.setToolTip(meta.get("ports", ""))
+        ports_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(ports_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
+def _ingress_accent(address: str) -> str:
+    a = (address or "").strip().lower()
+    if not a or a in ("-", "<none>", "<pending>"):
+        return T["WARNING"]
+    return T["SUCCESS"]
+
+
+class IngressCardWidget(_CardBase):
+    """One Ingress rule, as a card. `meta` matches what _populate_ingress
+    builds: namespace, name, class, hosts, address, ports, age."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        super().__init__(_ingress_accent(meta.get("address", "")), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        cls = meta.get("class", "") or "-"
+        if cls != "-":
+            top.addWidget(_pill(cls, "INFO"))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        hosts_lbl = _meta_label(meta.get("hosts", "-") or "-")
+        hosts_lbl.setToolTip(meta.get("hosts", ""))
+        hosts_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(hosts_lbl, 1)
+
+        bottom.addWidget(_meta_label(meta.get("address", "-") or "-"))
+        bottom.addWidget(_meta_label(meta.get("ports", "-") or "-"))
+
+        outer.addLayout(bottom)
+
+
 class ConfigCardWidget(_CardBase):
     """One ConfigMap or Secret, as a card, for the Config & Secrets list.
     `meta` = {"name": str, "type": "configmap" | "secret"}.

@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QApplication, QComboBox, QMessageBox, QSplitter, QWidget,
     QPlainTextEdit, QTextBrowser, QAbstractItemView, QTreeWidget,
     QTreeWidgetItem, QHeaderView, QShortcut, QSlider,
-    QScrollArea, QStackedWidget,
+    QScrollArea, QStackedWidget, QCompleter,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QUrl
 from PyQt5.QtGui import QFont, QColor, QTextCursor, QTextCharFormat, QKeySequence, QIntValidator
@@ -2493,6 +2493,28 @@ class _ServiceCard(QFrame):
         self._apply_styles()
 
 
+def _contains_completer(combo: QComboBox) -> QCompleter:
+    """Attach a "contains, not just starts-with" popup completer to an
+    editable QComboBox, sharing the combo's own model so it stays in sync
+    whenever the combo's items are cleared/reloaded (e.g. after a
+    dependent-dropdown query) without needing to be rebuilt.
+
+    Qt's default combo-box completer only matches from the start of the
+    string and mostly just auto-fills inline, so typing "api" against
+    ["auth-api", "payments-api", "api-gateway"] would show nothing (or at
+    best "api-gateway") instead of all three. This switches to
+    case-insensitive substring matching with a real dropdown popup of
+    every match, which is what you want when picking a k8s service name
+    out of a list you didn't choose.
+    """
+    completer = QCompleter(combo.model(), combo)
+    completer.setCaseSensitivity(Qt.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchContains)
+    completer.setCompletionMode(QCompleter.PopupCompletion)
+    combo.setCompleter(completer)
+    return completer
+
+
 class _ServiceFormPanel(QFrame):
     """Inline add/edit form. Shown in place of the card list (via a
     QStackedWidget in the owning dialog) rather than as its own popup
@@ -2535,12 +2557,14 @@ class _ServiceFormPanel(QFrame):
         self.ns_input.addItems(self._namespaces)
         self.ns_input.setCurrentText("default")
         self.ns_input.activated[str].connect(self._on_ns_picked)
+        _contains_completer(self.ns_input)
 
         self.name_input = QComboBox()
         self.name_input.setEditable(True)
         self.name_input.setInsertPolicy(QComboBox.NoInsert)
         self.name_input.lineEdit().setPlaceholderText("e.g. auth-service")
         self.name_input.activated[str].connect(self._on_svc_picked)
+        _contains_completer(self.name_input)
 
         ports_row = QHBoxLayout()
         ports_row.setSpacing(14)
@@ -2564,6 +2588,7 @@ class _ServiceFormPanel(QFrame):
         self.container_port_input.setInsertPolicy(QComboBox.NoInsert)
         self.container_port_input.lineEdit().setPlaceholderText("defaults to local port")
         self.container_port_input.lineEdit().setValidator(QIntValidator(1, 65535, self))
+        _contains_completer(self.container_port_input)
         container_col.addWidget(self.container_port_input)
         ports_row.addLayout(container_col)
 

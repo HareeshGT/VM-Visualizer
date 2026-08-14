@@ -21,7 +21,10 @@ from PyQt5.QtWidgets import QCompleter
 from themes import T, apply_qss_to, load_settings, save_settings
 from workers import CommandWorker, track_worker
 from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog
-from k8s_cards import PodCardWidget, DeploymentCardWidget, ConfigCardWidget
+from k8s_cards import (
+    PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
+    ServiceCardWidget, IngressCardWidget,
+)
 from utils import (
     append_terminal_html, append_terminal_text,
     load_tunnel_services, REMOTE_TUNNEL_CSV_PATH,
@@ -178,6 +181,7 @@ class KubernetesTab(QWidget):
         self._build_pods_tab()
         self._build_deployments_tab()
         self._build_services_tab()
+        self._build_ingress_tab()
         self._build_config_tab()
         self._build_tunnels_tab()
         self._build_terminal_tab()
@@ -385,60 +389,94 @@ class KubernetesTab(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setHandleWidth(1)
+        tb = QHBoxLayout()
+        tb.setContentsMargins(10, 6, 10, 6)
+        tb.setSpacing(8)
+        self.svc_filter = QLineEdit()
+        self.svc_filter.setPlaceholderText("🔍  Filter services…")
+        self.svc_filter.setMaximumWidth(200)
+        self.svc_filter.textChanged.connect(self._filter_services)
+        tb.addWidget(self.svc_filter)
 
-        # Services
-        svc_grp = QWidget()
-        sg = QVBoxLayout(svc_grp)
-        sg.setContentsMargins(0, 0, 0, 0)
-        sg.setSpacing(0)
-        self.svc_hdr = QLabel("  Services")
-        self.svc_hdr.setFixedHeight(30)
-        self.svc_hdr.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
-            f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
-        )
-        sg.addWidget(self.svc_hdr)
-        self.svc_tree = QTreeWidget()
-        self._style_tree(self.svc_tree)
-        self.svc_tree.setRootIsDecorated(False)
-        self.svc_tree.setAlternatingRowColors(True)
-        self.svc_tree.setColumnCount(5)
-        self.svc_tree.setHeaderLabels(["Name", "Type", "Cluster-IP", "External-IP", "Ports"])
-        hdr = self.svc_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
-        for i in (1, 2, 3):
-            hdr.setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        sg.addWidget(self.svc_tree)
-        splitter.addWidget(svc_grp)
+        self.svc_count_lbl = QLabel("")
+        tb.addWidget(self.svc_count_lbl)
+        tb.addStretch()
 
-        # Ingress
-        ing_grp = QWidget()
-        ig = QVBoxLayout(ing_grp)
-        ig.setContentsMargins(0, 0, 0, 0)
-        ig.setSpacing(0)
-        self.ing_hdr = QLabel("  Ingress")
-        self.ing_hdr.setFixedHeight(30)
-        self.ing_hdr.setStyleSheet(
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
-            f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
+        self.svc_desc_btn = self._toolbar_btn("📋  Describe")
+        self.svc_desc_btn.clicked.connect(self._svc_describe)
+        tb.addWidget(self.svc_desc_btn)
+
+        self.svc_del_btn = self._toolbar_btn("🗑  Delete", object_name="danger")
+        self.svc_del_btn.clicked.connect(self._svc_delete)
+        tb.addWidget(self.svc_del_btn)
+
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        tb_widget.setLayout(tb)
+        lay.addWidget(tb_widget)
+        self.svc_toolbar = tb_widget
+
+        # Same card-list treatment as Pods/Deployments — see k8s_cards.py.
+        self.svc_list = QListWidget()
+        self.svc_list.setSpacing(6)
+        self.svc_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.svc_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.svc_list.customContextMenuRequested.connect(self._svc_ctx_menu)
+        self.svc_list.itemDoubleClicked.connect(self._on_svc_double_click)
+        self.svc_list.currentItemChanged.connect(self._on_svc_selection_changed)
+        self.svc_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
         )
-        ig.addWidget(self.ing_hdr)
-        self.ing_tree = QTreeWidget()
-        self._style_tree(self.ing_tree)
-        self.ing_tree.setRootIsDecorated(False)
-        self.ing_tree.setAlternatingRowColors(True)
-        self.ing_tree.setColumnCount(4)
-        self.ing_tree.setHeaderLabels(["Name", "Class", "Hosts", "Address"])
-        for i in range(4):
-            self.ing_tree.header().setSectionResizeMode(i, QHeaderView.Stretch)
-        ig.addWidget(self.ing_tree)
-        splitter.addWidget(ing_grp)
-        splitter.setSizes([300, 200])
-        lay.addWidget(splitter)
-        self.sub_tabs.addTab(w, "🌐  Services & Ingress")
+        lay.addWidget(self.svc_list)
+        self.sub_tabs.addTab(w, "🧭  Services")
+
+    def _build_ingress_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        tb = QHBoxLayout()
+        tb.setContentsMargins(10, 6, 10, 6)
+        tb.setSpacing(8)
+        self.ing_filter = QLineEdit()
+        self.ing_filter.setPlaceholderText("🔍  Filter ingress…")
+        self.ing_filter.setMaximumWidth(200)
+        self.ing_filter.textChanged.connect(self._filter_ingress)
+        tb.addWidget(self.ing_filter)
+
+        self.ing_count_lbl = QLabel("")
+        tb.addWidget(self.ing_count_lbl)
+        tb.addStretch()
+
+        self.ing_desc_btn = self._toolbar_btn("📋  Describe")
+        self.ing_desc_btn.clicked.connect(self._ing_describe)
+        tb.addWidget(self.ing_desc_btn)
+
+        self.ing_del_btn = self._toolbar_btn("🗑  Delete", object_name="danger")
+        self.ing_del_btn.clicked.connect(self._ing_delete)
+        tb.addWidget(self.ing_del_btn)
+
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        tb_widget.setLayout(tb)
+        lay.addWidget(tb_widget)
+        self.ing_toolbar = tb_widget
+
+        self.ing_list = QListWidget()
+        self.ing_list.setSpacing(6)
+        self.ing_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ing_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ing_list.customContextMenuRequested.connect(self._ing_ctx_menu)
+        self.ing_list.itemDoubleClicked.connect(self._on_ing_double_click)
+        self.ing_list.currentItemChanged.connect(self._on_ing_selection_changed)
+        self.ing_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.ing_list)
+        self.sub_tabs.addTab(w, "🌐  Ingress")
 
     def _build_config_tab(self):
         w = QWidget()
@@ -785,6 +823,7 @@ class KubernetesTab(QWidget):
         )
         toolbar_style = f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
         for bar in (getattr(self, "pods_toolbar", None), getattr(self, "deploy_toolbar", None),
+                    getattr(self, "svc_toolbar", None), getattr(self, "ing_toolbar", None),
                     getattr(self, "tunnel_toolbar", None)):
             if bar is not None:
                 bar.setStyleSheet(toolbar_style)
@@ -798,13 +837,6 @@ class KubernetesTab(QWidget):
             running = self._tunnel_process is not None and self._tunnel_process.state() != QProcess.NotRunning
             color = T['SUCCESS'] if running else T['TEXT_MUTED']
             self.tunnel_status_lbl.setStyleSheet(f"color: {color}; font-size: 12px;")
-        header_style = (
-            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
-            f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 12px;"
-        )
-        for lbl in (getattr(self, "svc_hdr", None), getattr(self, "ing_hdr", None)):
-            if lbl is not None:
-                lbl.setStyleSheet(header_style)
         if getattr(self, "cfg_detail_hdr", None) is not None:
             self.cfg_detail_hdr.setStyleSheet(
                 f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
@@ -937,8 +969,12 @@ class KubernetesTab(QWidget):
         self.pod_count_lbl.setStyleSheet("")
         self.deploy_count_lbl.setText("")
         self.deploy_count_lbl.setStyleSheet("")
-        self.svc_tree.clear()
-        self.ing_tree.clear()
+        self.svc_list.clear()
+        self.svc_count_lbl.setText("")
+        self.svc_count_lbl.setStyleSheet("")
+        self.ing_list.clear()
+        self.ing_count_lbl.setText("")
+        self.ing_count_lbl.setStyleSheet("")
         self.cfg_list.clear()
         self.cfg_detail.clear()
         self.cfg_raw.clear()
@@ -950,9 +986,10 @@ class KubernetesTab(QWidget):
         idx = self.sub_tabs.currentIndex()
         if   idx == 0: self._load_pods()
         elif idx == 1: self._load_deployments()
-        elif idx == 2: self._load_services(); self._load_ingress()
-        elif idx == 3: self._load_config_resources()
-        elif idx == 4: self._refresh_tunnel_status()
+        elif idx == 2: self._load_services()
+        elif idx == 3: self._load_ingress()
+        elif idx == 4: self._load_config_resources()
+        elif idx == 5: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
     # `kubectl get pods -o wide` renders the RESTARTS column as a plain
@@ -1251,39 +1288,201 @@ class KubernetesTab(QWidget):
             self._run_cmd(f"kubectl delete deployment {dep} -n {ns} 2>&1",
                           lambda o: (self._log(o), self._load_deployments()))
 
-    # ── Services & Ingress ────────────────────────────────────
+    # ── Services ──────────────────────────────────────────────
     def _load_services(self):
         self._run_cmd(f"kubectl get services {self._ns_flag()} 2>&1", self._populate_services)
 
     def _populate_services(self, out: str):
-        self.svc_tree.clear()
+        self.svc_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        total = 0
         for line in out.strip().splitlines()[1:]:
             parts = line.split()
-            if len(parts) < 5:
-                continue
-            name, stype, cluster, ext = parts[:4]
-            ports = " ".join(parts[4:])
-            item  = QTreeWidgetItem([name, stype, cluster, ext, ports])
-            if stype == "LoadBalancer":
-                item.setForeground(1, QColor(T['ACCENT2']))
-            elif stype == "NodePort":
-                item.setForeground(1, QColor(T['INFO']))
-            self.svc_tree.addTopLevelItem(item)
+            # `kubectl get services --all-namespaces` prepends NAMESPACE —
+            # same shifted-columns reasoning as _populate_pods/_populate_deployments.
+            if all_ns:
+                if len(parts) < 7:
+                    continue
+                ns, name, stype, cluster, ext, ports, age = parts[:7]
+            else:
+                if len(parts) < 6:
+                    continue
+                ns = self._current_ns or "default"
+                name, stype, cluster, ext, ports, age = parts[:6]
+            meta = {
+                "namespace": ns, "name": name, "type": stype,
+                "cluster_ip": cluster, "external_ip": ext,
+                "ports": ports, "age": age,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, ServiceCardWidget.CARD_HEIGHT))
+            self.svc_list.addItem(item)
+            self.svc_list.setItemWidget(item, ServiceCardWidget(meta, all_ns))
+            total += 1
+        color_key = "TEXT_MUTED" if total == 0 else "INFO"
+        self._set_count_badge(self.svc_count_lbl,
+                               f"{total} service{'s' if total != 1 else ''}", color_key)
+        # Same reasoning as _populate_pods: rebuild wipes the visual filter
+        # state even though the filter box still has text — reapply it.
+        self._filter_services(self.svc_filter.text())
 
+    def _filter_services(self, text: str):
+        q = text.lower()
+        for i in range(self.svc_list.count()):
+            item = self.svc_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
+
+    def _selected_svc(self) -> tuple:  # (Optional[str], str)
+        item = self.svc_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select a service first.")
+            return None, ""
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
+
+    def _on_svc_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("service", meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_svc_selection_changed(self, current, previous):
+        """Same reasoning as _on_pod_selection_changed above."""
+        if previous is not None:
+            w = self.svc_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.svc_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _svc_describe(self):
+        svc, ns = self._selected_svc()
+        if svc:
+            self._describe("service", svc, ns)
+
+    def _svc_delete(self):
+        svc, ns = self._selected_svc()
+        if not svc:
+            return
+        if QMessageBox.question(self, "Delete Service", f'Delete service "{svc}"?',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl delete service -n {ns} {svc} 2>&1",
+                          lambda o: (self._log(o), self._load_services()))
+
+    def _svc_ctx_menu(self, pos):
+        item = self.svc_list.itemAt(pos)
+        if not item:
+            return
+        self.svc_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        svc  = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        menu = QMenu(self)
+        menu.addAction("📄  Describe", lambda: self._describe("service", svc, ns))
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._svc_delete)
+        menu.exec_(self.svc_list.viewport().mapToGlobal(pos))
+
+    # ── Ingress ───────────────────────────────────────────────
     def _load_ingress(self):
         self._run_cmd(f"kubectl get ingress {self._ns_flag()} 2>&1", self._populate_ingress)
 
     def _populate_ingress(self, out: str):
-        self.ing_tree.clear()
+        self.ing_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        total = 0
         for line in out.strip().splitlines()[1:]:
             parts = line.split()
-            if len(parts) < 3:
+            if not parts:
                 continue
-            name    = parts[0]
-            cls     = parts[1] if len(parts) > 1 else "-"
-            hosts   = parts[2] if len(parts) > 2 else "-"
-            address = parts[3] if len(parts) > 3 else "-"
-            self.ing_tree.addTopLevelItem(QTreeWidgetItem([name, cls, hosts, address]))
+            if all_ns:
+                if len(parts) < 2:
+                    continue
+                ns, name = parts[0], parts[1]
+                rest = parts[2:]
+            else:
+                ns = self._current_ns or "default"
+                name = parts[0]
+                rest = parts[1:]
+            cls     = rest[0] if len(rest) > 0 else "-"
+            hosts   = rest[1] if len(rest) > 1 else "-"
+            address = rest[2] if len(rest) > 2 else "-"
+            ports   = rest[3] if len(rest) > 3 else "-"
+            age     = rest[4] if len(rest) > 4 else "-"
+            meta = {
+                "namespace": ns, "name": name, "class": cls, "hosts": hosts,
+                "address": address, "ports": ports, "age": age,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, IngressCardWidget.CARD_HEIGHT))
+            self.ing_list.addItem(item)
+            self.ing_list.setItemWidget(item, IngressCardWidget(meta, all_ns))
+            total += 1
+        color_key = "TEXT_MUTED" if total == 0 else "INFO"
+        self._set_count_badge(self.ing_count_lbl,
+                               f"{total} rule{'s' if total != 1 else ''}", color_key)
+        self._filter_ingress(self.ing_filter.text())
+
+    def _filter_ingress(self, text: str):
+        q = text.lower()
+        for i in range(self.ing_list.count()):
+            item = self.ing_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
+
+    def _selected_ing(self) -> tuple:  # (Optional[str], str)
+        item = self.ing_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select an ingress first.")
+            return None, ""
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
+
+    def _on_ing_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("ingress", meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_ing_selection_changed(self, current, previous):
+        """Same reasoning as _on_pod_selection_changed above."""
+        if previous is not None:
+            w = self.ing_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.ing_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _ing_describe(self):
+        ing, ns = self._selected_ing()
+        if ing:
+            self._describe("ingress", ing, ns)
+
+    def _ing_delete(self):
+        ing, ns = self._selected_ing()
+        if not ing:
+            return
+        if QMessageBox.question(self, "Delete Ingress", f'Delete ingress "{ing}"?',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl delete ingress -n {ns} {ing} 2>&1",
+                          lambda o: (self._log(o), self._load_ingress()))
+
+    def _ing_ctx_menu(self, pos):
+        item = self.ing_list.itemAt(pos)
+        if not item:
+            return
+        self.ing_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        ing  = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        menu = QMenu(self)
+        menu.addAction("📄  Describe", lambda: self._describe("ingress", ing, ns))
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._ing_delete)
+        menu.exec_(self.ing_list.viewport().mapToGlobal(pos))
 
     # ── Config & Secrets ──────────────────────────────────────
     def _load_config_resources(self, _=None):
