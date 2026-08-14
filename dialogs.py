@@ -2497,15 +2497,29 @@ class _ServiceFormPanel(QFrame):
     """Inline add/edit form. Shown in place of the card list (via a
     QStackedWidget in the owning dialog) rather than as its own popup
     dialog — keeps the whole flow feeling like one continuous window
-    instead of a stack of nested modals."""
+    instead of a stack of nested modals.
+
+    Namespace, Service Name, and Container Port are editable QComboBoxes
+    rather than plain text fields: Namespace is pre-filled from the
+    namespaces KubernetesTab already has cached; picking one queries the
+    connected VM for that namespace's services (`kubectl get svc -n ...`)
+    to fill Service Name; picking a service queries its actual container
+    ports (`kubectl get svc <name> -n <ns>`) to fill Container Port. All
+    three stay editable (QComboBox.setEditable) so a service that doesn't
+    exist yet can still be typed in by hand — this is convenience
+    autocomplete, not a hard constraint tied to what's live on the cluster.
+    """
 
     save_clicked   = pyqtSignal(dict, object)   # (new_data, original_svc_or_None)
     cancel_clicked = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, ssh=None, namespaces=None, parent=None):
         super().__init__(parent)
         self.setObjectName("tunnel_form_panel")
-        self._editing = None
+        self._editing    = None
+        self.ssh         = ssh
+        self._namespaces = list(namespaces or [])
+        self._workers    = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(22, 20, 22, 20)
@@ -2514,11 +2528,19 @@ class _ServiceFormPanel(QFrame):
         self.heading = QLabel("Add a new service")
         outer.addWidget(self.heading)
 
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("e.g. auth-service")
+        # Namespace first — Service Name's choices depend on it.
+        self.ns_input = QComboBox()
+        self.ns_input.setEditable(True)
+        self.ns_input.setInsertPolicy(QComboBox.NoInsert)
+        self.ns_input.addItems(self._namespaces)
+        self.ns_input.setCurrentText("default")
+        self.ns_input.activated[str].connect(self._on_ns_picked)
 
-        self.ns_input = QLineEdit()
-        self.ns_input.setPlaceholderText("e.g. default")
+        self.name_input = QComboBox()
+        self.name_input.setEditable(True)
+        self.name_input.setInsertPolicy(QComboBox.NoInsert)
+        self.name_input.lineEdit().setPlaceholderText("e.g. auth-service")
+        self.name_input.activated[str].connect(self._on_svc_picked)
 
         ports_row = QHBoxLayout()
         ports_row.setSpacing(14)
@@ -2537,16 +2559,18 @@ class _ServiceFormPanel(QFrame):
         container_col.setSpacing(4)
         container_lbl = QLabel("CONTAINER PORT")
         container_col.addWidget(container_lbl)
-        self.container_port_input = QLineEdit()
-        self.container_port_input.setPlaceholderText("defaults to local port")
-        self.container_port_input.setValidator(QIntValidator(1, 65535, self))
+        self.container_port_input = QComboBox()
+        self.container_port_input.setEditable(True)
+        self.container_port_input.setInsertPolicy(QComboBox.NoInsert)
+        self.container_port_input.lineEdit().setPlaceholderText("defaults to local port")
+        self.container_port_input.lineEdit().setValidator(QIntValidator(1, 65535, self))
         container_col.addWidget(self.container_port_input)
         ports_row.addLayout(container_col)
 
         self._field_labels = []
         for label_text, field in [
-            ("SERVICE NAME", self.name_input),
             ("NAMESPACE",    self.ns_input),
+            ("SERVICE NAME", self.name_input),
         ]:
             lbl = QLabel(label_text)
             self._field_labels.append(lbl)
@@ -2594,38 +2618,115 @@ class _ServiceFormPanel(QFrame):
             f"color: {T['DANGER']}; font-size: 12px; background: transparent;"
         )
 
+    # ── Context from the owning dialog ──────────────────────────
+    def set_context(self, ssh, namespaces: list):
+        """Called by ManageTunnelServicesDialog whenever it (re)opens, so
+        the form always has the current SSH connection and namespace list
+        rather than whatever was passed in at construction time."""
+        self.ssh = ssh
+        self._namespaces = list(namespaces or [])
+        current = self.ns_input.currentText()
+        self.ns_input.blockSignals(True)
+        self.ns_input.clear()
+        self.ns_input.addItems(self._namespaces)
+        self.ns_input.setCurrentText(current or "default")
+        self.ns_input.blockSignals(False)
+
+    # ── Dependent-dropdown queries ───────────────────────────────
+    def _run_query(self, cmd: str, callback):
+        if not self.ssh:
+            return
+        worker = CommandWorker(self.ssh, cmd)
+        worker.done.connect(callback)
+        worker.error.connect(lambda _e: None)  # best-effort autocomplete only
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _on_ns_picked(self, ns: str):
+        self._reload_services(ns.strip())
+
+    def _reload_services(self, ns: str):
+        if not ns:
+            return
+        self._run_query(
+            f"kubectl get svc -n {shlex.quote(ns)} "
+            f"-o jsonpath='{{.items[*].metadata.name}}' 2>&1",
+            self._populate_services,
+        )
+
+    def _populate_services(self, out: str):
+        names = out.strip().strip("'").split()
+        current = self.name_input.currentText()
+        self.name_input.blockSignals(True)
+        self.name_input.clear()
+        self.name_input.addItems(names)
+        self.name_input.setCurrentText(current)
+        self.name_input.blockSignals(False)
+
+    def _on_svc_picked(self, svc: str):
+        svc = svc.strip()
+        ns  = self.ns_input.currentText().strip()
+        if not svc or not ns:
+            return
+        self._run_query(
+            f"kubectl get svc {shlex.quote(svc)} -n {shlex.quote(ns)} "
+            f"-o jsonpath='{{.spec.ports[*].port}}' 2>&1",
+            self._populate_container_ports,
+        )
+
+    def _populate_container_ports(self, out: str):
+        ports = out.strip().strip("'").split()
+        current = self.container_port_input.currentText()
+        self.container_port_input.blockSignals(True)
+        self.container_port_input.clear()
+        self.container_port_input.addItems(ports)
+        if current:
+            self.container_port_input.setCurrentText(current)
+        elif len(ports) == 1:
+            self.container_port_input.setCurrentText(ports[0])
+            if not self.local_port_input.text().strip():
+                self.local_port_input.setText(ports[0])
+        self.container_port_input.blockSignals(False)
+
     # ── Loading state ────────────────────────────────────────
     def load_for_add(self):
         self._editing = None
         self.heading.setText("➕  Add a new service")
         self.save_btn.setText("Add Service")
+        self.name_input.clearEditText()
         self.name_input.clear()
-        self.ns_input.setText("default")
+        self.ns_input.setCurrentText("default")
         self.local_port_input.clear()
+        self.container_port_input.clearEditText()
         self.container_port_input.clear()
         self.error_lbl.hide()
         self.name_input.setFocus()
+        self._reload_services(self.ns_input.currentText().strip())
 
     def load_for_edit(self, svc: dict):
         self._editing = svc
         self.heading.setText(f"✏️  Edit “{svc['name']}”")
         self.save_btn.setText("Save Changes")
-        self.name_input.setText(svc["name"])
-        self.ns_input.setText(svc.get("namespace", ""))
+        ns = svc.get("namespace", "") or "default"
+        self.ns_input.setCurrentText(ns)
+        self.name_input.clear()
+        self.name_input.setCurrentText(svc["name"])
         self.local_port_input.setText(str(svc["port"]))
-        self.container_port_input.setText(str(svc["container_port"]))
+        self.container_port_input.clear()
+        self.container_port_input.setCurrentText(str(svc["container_port"]))
         self.error_lbl.hide()
         self.name_input.setFocus()
+        self._reload_services(ns)
 
     def show_error(self, msg: str):
         self.error_lbl.setText("⚠️  " + msg)
         self.error_lbl.show()
 
     def _on_save(self):
-        name = self.name_input.text().strip()
-        ns   = self.ns_input.text().strip()
+        name = self.name_input.currentText().strip()
+        ns   = self.ns_input.currentText().strip()
         local_s     = self.local_port_input.text().strip()
-        container_s = self.container_port_input.text().strip() or local_s
+        container_s = self.container_port_input.currentText().strip() or local_s
 
         if not name:
             self.show_error("Service name is required.")
@@ -2646,6 +2747,7 @@ class _ServiceFormPanel(QFrame):
         self.save_clicked.emit(data, self._editing)
 
 
+
 class ManageTunnelServicesDialog(QDialog):
     """Friendly, card-based editor for the tunnel-services CSV that lives on
     the connected VM (see utils.load_tunnel_services / REMOTE_TUNNEL_CSV_PATH).
@@ -2661,11 +2763,12 @@ class ManageTunnelServicesDialog(QDialog):
 
     services_saved = pyqtSignal(list)
 
-    def __init__(self, ssh, services: list, csv_path: str, parent=None):
+    def __init__(self, ssh, services: list, csv_path: str, namespaces: list = None, parent=None):
         super().__init__(parent)
         self.ssh = ssh
         self.csv_path = csv_path
         self._services = [dict(s) for s in services]
+        self._namespaces = list(namespaces or [])
         self._dirty = False
         self._worker = None
 
@@ -2729,7 +2832,7 @@ class ManageTunnelServicesDialog(QDialog):
         self.stack.addWidget(list_page)
 
         # ── Form page ────────────────────────────────────────
-        self.form_panel = _ServiceFormPanel()
+        self.form_panel = _ServiceFormPanel(ssh=self.ssh, namespaces=self._namespaces)
         self.form_panel.save_clicked.connect(self._on_form_save)
         self.form_panel.cancel_clicked.connect(self._show_list)
         self.stack.addWidget(self.form_panel)

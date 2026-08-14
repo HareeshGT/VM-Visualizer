@@ -11,14 +11,14 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QListWidget, QListWidgetItem, QTextEdit,
     QSplitter, QFrame, QSpinBox, QHeaderView, QAbstractItemView,
     QDialog, QVBoxLayout as _QVL, QDialogButtonBox, QMessageBox,
-    QMenu,
+    QMenu, QInputDialog,
 )
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess, QSize
 from PyQt5.QtGui import QColor, QFont, QFontDatabase
 from PyQt5.QtWidgets import QCompleter
 
-from themes import T, apply_qss_to
+from themes import T, apply_qss_to, load_settings, save_settings
 from workers import CommandWorker, track_worker
 from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog
 from k8s_cards import PodCardWidget, DeploymentCardWidget, ConfigCardWidget
@@ -50,6 +50,11 @@ class KubernetesTab(QWidget):
         self._tunnel_services = []
         self._tunnel_col_widths = (20, 20)
         self._tunnel_process  = None
+        # Remote CSV path tunnel services are read from/written to — lets
+        # each person point this at their own file (e.g. a per-project or
+        # per-team convention) instead of being locked to the hardcoded
+        # default. Persisted across restarts via themes.save_settings.
+        self._tunnel_csv_path = load_settings().get("tunnel_csv_path") or REMOTE_TUNNEL_CSV_PATH
         self._build_ui()
 
     # ── Local connection info (for tunnelling) ────────────────
@@ -623,10 +628,21 @@ class KubernetesTab(QWidget):
         tb.setContentsMargins(10, 6, 10, 6)
         tb.setSpacing(8)
 
-        self.tunnel_path_lbl = QLabel(f"📄  {REMOTE_TUNNEL_CSV_PATH}  (on VM)")
+        self.tunnel_path_lbl = QLabel(f"📄  {self._tunnel_csv_path}  (on VM)")
         self.tunnel_path_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 13px;")
         tb.addWidget(self.tunnel_path_lbl)
         tb.addStretch()
+
+        change_file_btn = self._toolbar_btn(
+            "📂  Change File",
+            tooltip=(
+                "Point at a different tunnel-services CSV on the connected VM\n"
+                "(e.g. a personal or per-project file instead of the shared default).\n"
+                "Remembered for next time."
+            ),
+        )
+        change_file_btn.clicked.connect(self._change_tunnel_csv_path)
+        tb.addWidget(change_file_btn)
 
         reload_btn = self._toolbar_btn("↺  Reload CSV")
         reload_btn.clicked.connect(self._load_tunnel_csv)
@@ -1481,10 +1497,31 @@ class KubernetesTab(QWidget):
             )
             return
         dlg = ManageTunnelServicesDialog(
-            self.ssh, self._tunnel_services, REMOTE_TUNNEL_CSV_PATH, parent=self
+            self.ssh, self._tunnel_services, self._tunnel_csv_path,
+            namespaces=self._namespaces, parent=self,
         )
         dlg.services_saved.connect(lambda _: self._load_tunnel_csv())
         dlg.exec_()
+
+    def _change_tunnel_csv_path(self):
+        """Let the user point the Tunnels tab at a different remote CSV
+        (e.g. their own file instead of the shared team default), and
+        remember the choice across restarts."""
+        path, ok = QInputDialog.getText(
+            self, "Change Tunnel Services File",
+            "Remote CSV path (on the connected VM):",
+            QLineEdit.Normal, self._tunnel_csv_path,
+        )
+        if not ok:
+            return
+        path = path.strip()
+        if not path or path == self._tunnel_csv_path:
+            return
+        self._tunnel_csv_path = path
+        self.tunnel_path_lbl.setText(f"📄  {self._tunnel_csv_path}  (on VM)")
+        save_settings(tunnel_csv_path=self._tunnel_csv_path)
+        if self.ssh:
+            self._load_tunnel_csv()
 
     def _load_tunnel_csv(self):
         """Load tunnel services from the currently connected VM."""
@@ -1502,7 +1539,7 @@ class KubernetesTab(QWidget):
         # Load services from the connected VM
         self._tunnel_services = load_tunnel_services(
             self.ssh,
-            REMOTE_TUNNEL_CSV_PATH
+            self._tunnel_csv_path
         )
 
         if not self._tunnel_services:

@@ -87,9 +87,18 @@ os.makedirs(APP_DIR, exist_ok=True)
 CURRENT_THEME = "Obsidian Purple"
 
 
-def save_settings():
+def save_settings(**extra):
+    """Persist app-wide settings to disk. Merges any extra key/value pairs
+    (e.g. a custom tunnel-services CSV path) on top of whatever is already
+    saved, and always includes the current theme — so a caller that only
+    cares about one setting (e.g. KubernetesTab saving a CSV path) doesn't
+    clobber a setting written by another part of the app (e.g. the theme
+    picker), and vice versa."""
+    data = load_settings()
+    data["theme"] = CURRENT_THEME
+    data.update(extra)
     with open(SETTINGS_FILE, "w") as f:
-        json.dump({"theme": CURRENT_THEME}, f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 def load_settings():
