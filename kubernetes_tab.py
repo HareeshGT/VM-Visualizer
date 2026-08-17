@@ -35,6 +35,18 @@ from utils import (
 class KubernetesTab(QWidget):
     status_msg = pyqtSignal(str)
 
+    # Cap on simultaneous tunnel-restart CommandWorkers. Each worker's
+    # run() opens TWO channels on the shared SSH transport (one exec_command
+    # to probe $HOME, one for the actual restart command) — see workers.py.
+    # sshd's default MaxSessions caps concurrent channels per connection at
+    # 10, so firing off every selected service's worker at once (previously
+    # all of them, unbounded) blew past that ceiling once more than ~5
+    # services were selected, and every worker past the limit failed with
+    # ChannelException(2, 'Connect failed') / "Unable to open channel."
+    # Staying at 4 concurrent workers (≤8 channels) keeps headroom under
+    # the default limit even on servers with other channels already open.
+    MAX_CONCURRENT_TUNNEL_RESTARTS = 4
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.ssh          = None
@@ -2014,29 +2026,42 @@ class KubernetesTab(QWidget):
             return
 
         # Each service's restart is an independent SSH command (kill-port +
-        # nohup port-forward), so there's no reason to wait for one to
-        # finish before starting the next — paramiko opens a new channel
-        # per exec_command on the same transport, so concurrent workers on
-        # self.ssh are safe. Fire them all at once and just track how many
-        # are still outstanding, instead of the old pop-one/wait/run-next
-        # queue that serialized what could be a dozen services.
-        self._tunnel_restart_pending = len(services)
-        self._tunnel_restart_failed  = []
+        # nohup port-forward), so there's no dependency between them — but
+        # each one's CommandWorker opens its own channel(s) on the *same*
+        # SSH transport, and sshd caps how many of those can be open at
+        # once (MaxSessions, commonly 10). Firing every selected service at
+        # once used to blow past that ceiling as soon as more than a
+        # handful were selected, and every worker beyond the limit failed
+        # with ChannelException/"Unable to open channel." Instead, queue
+        # everything and keep only MAX_CONCURRENT_TUNNEL_RESTARTS workers
+        # in flight; each finished worker pulls the next one off the queue.
+        self._tunnel_restart_queue    = list(services)
+        self._tunnel_restart_pending  = len(services)
+        self._tunnel_restart_failed   = []
+        self._tunnel_restart_inflight = 0
 
         self.tunnel_restart_btn.setEnabled(False)
         self.progress.show()
 
-        for service in services:
-            cmd = self._build_kubectl_tunnel_restart_cmd([service])  # single-service cmd
-            append_terminal_html(
-                self.tunnel_log,
-                f"<span style='color:{T['ACCENT2']}'>$ {self._esc(cmd)}</span>"
-            )
-            worker = CommandWorker(self.ssh, cmd)
-            worker.done.connect(lambda out, svc=service: self._on_tunnel_step_done(svc, out))
-            worker.error.connect(lambda err, svc=service: self._on_tunnel_step_error(svc, err))
-            track_worker(self._workers, worker)
-            worker.start()
+        for _ in range(min(self.MAX_CONCURRENT_TUNNEL_RESTARTS, len(self._tunnel_restart_queue))):
+            self._start_next_tunnel_restart()
+
+    def _start_next_tunnel_restart(self):
+        if not self._tunnel_restart_queue:
+            return
+        service = self._tunnel_restart_queue.pop(0)
+        self._tunnel_restart_inflight += 1
+
+        cmd = self._build_kubectl_tunnel_restart_cmd([service])  # single-service cmd
+        append_terminal_html(
+            self.tunnel_log,
+            f"<span style='color:{T['ACCENT2']}'>$ {self._esc(cmd)}</span>"
+        )
+        worker = CommandWorker(self.ssh, cmd)
+        worker.done.connect(lambda out, svc=service: self._on_tunnel_step_done(svc, out))
+        worker.error.connect(lambda err, svc=service: self._on_tunnel_step_error(svc, err))
+        track_worker(self._workers, worker)
+        worker.start()
 
     def _on_tunnel_step_done(self, service, output):
         append_terminal_html(
@@ -2055,10 +2080,15 @@ class KubernetesTab(QWidget):
 
     def _on_tunnel_step_finished(self):
         # Workers finish in whatever order the remote shell happens to
-        # complete them, not the order they were started — so completion
-        # is tracked purely by count, not by popping a queue.
-        self._tunnel_restart_pending -= 1
-        if self._tunnel_restart_pending <= 0:
+        # complete them, not the order they were started. Each completion
+        # frees up one of the MAX_CONCURRENT_TUNNEL_RESTARTS slots, so pull
+        # the next queued service (if any) in before checking whether the
+        # whole batch is done.
+        self._tunnel_restart_inflight -= 1
+        self._tunnel_restart_pending  -= 1
+        if self._tunnel_restart_queue:
+            self._start_next_tunnel_restart()
+        elif self._tunnel_restart_pending <= 0:
             self._finish_kubectl_tunnel_restarts()
 
     def _finish_kubectl_tunnel_restarts(self):
