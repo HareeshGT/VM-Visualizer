@@ -302,6 +302,64 @@ class DaemonSetCardWidget(_CardBase):
         outer.addLayout(bottom)
 
 
+def _event_type_color_key(etype: str) -> str:
+    return "DANGER" if (etype or "").lower() == "warning" else "INFO"
+
+
+class EventCardWidget(_CardBase):
+    """One cluster Event, as a card. `meta` matches what _populate_events
+    builds: namespace, type, reason, message, count, object_kind,
+    object_name, age.
+
+    Warning-type events get the DANGER accent so they visually jump out of
+    a feed that's otherwise mostly routine Normal events — this is the
+    whole point of the Events tab ("why did this just restart")."""
+
+    CARD_HEIGHT = 64
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        etype = meta.get("type", "") or "Normal"
+        super().__init__(T.get(_event_type_color_key(etype), T["TEXT_MUTED"]), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 6, 14, 6)
+        outer.setSpacing(3)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        reason_lbl = QLabel(meta.get("reason", "") or "-")
+        reason_lbl.setFont(monospace_font(13, bold=True))
+        reason_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        reason_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        top.addWidget(reason_lbl)
+
+        top.addWidget(_pill(etype, _event_type_color_key(etype)))
+
+        obj_kind = meta.get("object_kind", "")
+        obj_name = meta.get("object_name", "")
+        if obj_kind or obj_name:
+            top.addWidget(_chip(f"{obj_kind}/{obj_name}" if obj_kind else obj_name))
+
+        if show_namespace and meta.get("namespace"):
+            top.addWidget(_chip(meta.get("namespace", "")))
+
+        top.addStretch(1)
+
+        count = meta.get("count") or 1
+        if count and int(count) > 1:
+            top.addWidget(_pill(f"×{count}", "WARNING"))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        msg = meta.get("message", "") or ""
+        msg_lbl = QLabel(msg)
+        msg_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        msg_lbl.setToolTip(msg)
+        fm = msg_lbl.fontMetrics()
+        msg_lbl.setText(fm.elidedText(msg.replace("\n", " "), Qt.ElideRight, 900))
+        outer.addWidget(msg_lbl)
+
+
 def _svc_type_color_key(stype: str) -> str:
     s = (stype or "").lower()
     if s == "loadbalancer":

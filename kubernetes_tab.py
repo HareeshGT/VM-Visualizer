@@ -3,6 +3,7 @@
 import json
 import re
 import shlex
+from datetime import datetime, timezone
 
 
 from PyQt5.QtWidgets import (
@@ -11,7 +12,7 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QListWidget, QListWidgetItem, QTextEdit,
     QSplitter, QFrame, QSpinBox, QHeaderView, QAbstractItemView,
     QDialog, QVBoxLayout as _QVL, QDialogButtonBox, QMessageBox,
-    QMenu, QInputDialog,
+    QMenu, QInputDialog, QApplication,
 )
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess, QSize
@@ -24,7 +25,7 @@ from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog, Con
 from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
-    StatefulSetCardWidget, DaemonSetCardWidget,
+    StatefulSetCardWidget, DaemonSetCardWidget, EventCardWidget,
 )
 from utils import (
     append_terminal_html, append_terminal_text,
@@ -54,6 +55,8 @@ class KubernetesTab(QWidget):
         self._current_ns  = "default"
         self._namespaces  = []
         self._workers     = []
+        self._events_raw  = ""
+        self._events_warnings_only = False
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh)
         # Local (client-side) connection details, used to run the SSH
@@ -198,6 +201,7 @@ class KubernetesTab(QWidget):
         self._build_services_tab()
         self._build_ingress_tab()
         self._build_config_tab()
+        self._build_events_tab()
         self._build_tunnels_tab()
         self._build_terminal_tab()
 
@@ -751,6 +755,52 @@ class KubernetesTab(QWidget):
         self.cfg_type_secret_btn.setChecked(name == "Secrets")
         self._load_config_resources()
 
+    def _build_events_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        tb = QHBoxLayout()
+        tb.setContentsMargins(10, 6, 10, 6)
+        tb.setSpacing(8)
+        self.event_filter = QLineEdit()
+        self.event_filter.setPlaceholderText("🔍  Filter events (reason / object / message)…")
+        self.event_filter.setMaximumWidth(280)
+        self.event_filter.textChanged.connect(self._filter_events)
+        tb.addWidget(self.event_filter)
+
+        self.event_count_lbl = QLabel("")
+        tb.addWidget(self.event_count_lbl)
+        tb.addStretch()
+
+        self.event_warn_btn = self._toolbar_btn("⚠  Warnings only")
+        self.event_warn_btn.setCheckable(True)
+        self.event_warn_btn.toggled.connect(self._toggle_events_warnings_only)
+        tb.addWidget(self.event_warn_btn)
+
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        tb_widget.setLayout(tb)
+        lay.addWidget(tb_widget)
+        self.events_toolbar = tb_widget
+
+        # Newest first, warnings visually distinct — see EventCardWidget
+        # (k8s_cards.py) for the accent-color logic.
+        self.event_list = QListWidget()
+        self.event_list.setSpacing(4)
+        self.event_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.event_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.event_list.customContextMenuRequested.connect(self._event_ctx_menu)
+        self.event_list.itemDoubleClicked.connect(self._on_event_double_click)
+        self.event_list.currentItemChanged.connect(self._on_event_selection_changed)
+        self.event_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.event_list)
+        self.sub_tabs.addTab(w, "📡  Events")
+
     def _build_terminal_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -952,7 +1002,7 @@ class KubernetesTab(QWidget):
         for bar in (getattr(self, "pods_toolbar", None), getattr(self, "deploy_toolbar", None),
                     getattr(self, "sts_toolbar", None), getattr(self, "ds_toolbar", None),
                     getattr(self, "svc_toolbar", None), getattr(self, "ing_toolbar", None),
-                    getattr(self, "tunnel_toolbar", None)):
+                    getattr(self, "events_toolbar", None), getattr(self, "tunnel_toolbar", None)):
             if bar is not None:
                 bar.setStyleSheet(toolbar_style)
         if getattr(self, "tunnel_log", None) is not None:
@@ -1112,6 +1162,12 @@ class KubernetesTab(QWidget):
         self.cfg_list.clear()
         self.cfg_detail.clear()
         self.cfg_raw.clear()
+        self.event_list.clear()
+        self.event_count_lbl.setText("")
+        self.event_count_lbl.setStyleSheet("")
+        self._events_raw = ""
+        if getattr(self, "event_warn_btn", None) is not None:
+            self.event_warn_btn.setChecked(False)
         self.ns_combo.clear()
         self.health_lbl.setText("● Cluster")
         self.health_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
@@ -1125,7 +1181,8 @@ class KubernetesTab(QWidget):
         elif idx == 4: self._load_services()
         elif idx == 5: self._load_ingress()
         elif idx == 6: self._load_config_resources()
-        elif idx == 7: self._refresh_tunnel_status()
+        elif idx == 7: self._load_events()
+        elif idx == 8: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
     # `kubectl get pods -o wide` renders the RESTARTS column as a plain
@@ -2020,6 +2077,159 @@ class KubernetesTab(QWidget):
                 lines.append(f"  {pline}")
             lines.append("")
         self.cfg_raw.setPlainText("\n".join(lines).rstrip() + "\n")
+
+    # ── Events ────────────────────────────────────────────────
+    @staticmethod
+    def _humanize_age(iso_ts: str) -> str:
+        """Compact kubectl-style age ('45s' / '12m' / '3h' / '5d' / '2y')
+        from a Kubernetes ISO-8601 UTC timestamp. Events come from '-o json'
+        rather than a pre-formatted AGE column (unlike every other tab
+        here), so this has to be computed client-side."""
+        if not iso_ts:
+            return "-"
+        try:
+            ts = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return "-"
+        secs = max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
+        if secs < 60:
+            return f"{secs}s"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m"
+        hours = mins // 60
+        if hours < 24:
+            return f"{hours}h"
+        days = hours // 24
+        if days < 365:
+            return f"{days}d"
+        return f"{days // 365}y"
+
+    def _load_events(self):
+        self._run_cmd(f"kubectl get events {self._ns_flag()} -o json 2>&1", self._on_events_loaded)
+
+    def _on_events_loaded(self, out: str):
+        # Cached so the "Warnings only" toggle can re-filter instantly
+        # without an extra SSH round-trip.
+        self._events_raw = out
+        self._populate_events(out)
+
+    def _populate_events(self, out: str):
+        self.event_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+
+        def sort_key(it):
+            return (it.get("lastTimestamp") or it.get("eventTime")
+                    or (it.get("metadata") or {}).get("creationTimestamp") or "")
+
+        items.sort(key=sort_key, reverse=True)
+
+        warnings_only = getattr(self, "_events_warnings_only", False)
+        total = 0
+        warning_count = 0
+        for it in items:
+            etype = it.get("type") or "Normal"
+            if warnings_only and etype != "Warning":
+                continue
+            involved = it.get("involvedObject") or {}
+            ts = sort_key(it)
+            meta = {
+                "namespace":   (it.get("metadata") or {}).get("namespace", ""),
+                "type":        etype,
+                "reason":      it.get("reason", "") or "-",
+                "message":     it.get("message", "") or "",
+                "count":       it.get("count") or 1,
+                "object_kind": involved.get("kind", ""),
+                "object_name": involved.get("name", ""),
+                "age":         self._humanize_age(ts),
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, EventCardWidget.CARD_HEIGHT))
+            self.event_list.addItem(item)
+            self.event_list.setItemWidget(item, EventCardWidget(meta, all_ns))
+            total += 1
+            if etype == "Warning":
+                warning_count += 1
+
+        if total == 0:
+            color_key = "TEXT_MUTED"
+        elif warning_count == 0:
+            color_key = "SUCCESS"
+        else:
+            color_key = "DANGER"
+        self._set_count_badge(
+            self.event_count_lbl,
+            f"{total} event{'s' if total != 1 else ''} · {warning_count} warning{'s' if warning_count != 1 else ''}",
+            color_key,
+        )
+        self._filter_events(self.event_filter.text())
+
+    def _toggle_events_warnings_only(self, on: bool):
+        self._events_warnings_only = on
+        if getattr(self, "_events_raw", None):
+            self._populate_events(self._events_raw)
+        else:
+            self._load_events()
+
+    def _filter_events(self, text: str):
+        q = text.lower()
+        for i in range(self.event_list.count()):
+            item = self.event_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            searchable = (
+                f"{meta.get('reason', '')} {meta.get('object_kind', '')} "
+                f"{meta.get('object_name', '')} {meta.get('message', '')}"
+            ).lower()
+            item.setHidden(q not in searchable)
+
+    def _on_event_selection_changed(self, current, previous):
+        if previous is not None:
+            w = self.event_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.event_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _event_involved_object(self, meta: dict):
+        """Returns (kubectl_kind, name, namespace) for the object an event
+        is about, or (None, None, None) if the event didn't carry one."""
+        kind = (meta.get("object_kind") or "").lower()
+        name = meta.get("object_name")
+        if not kind or not name:
+            return None, None, None
+        ns = meta.get("namespace") or (
+            self._current_ns if self._current_ns != "(all namespaces)" else "default"
+        )
+        return kind, name, ns
+
+    def _on_event_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        kind, name, ns = self._event_involved_object(meta)
+        if kind:
+            self._describe(kind, name, ns)
+
+    def _event_ctx_menu(self, pos):
+        item = self.event_list.itemAt(pos)
+        if not item:
+            return
+        self.event_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        kind, name, ns = self._event_involved_object(meta)
+        menu = QMenu(self)
+        if kind:
+            menu.addAction(f"📄  Describe {meta.get('object_kind')}/{name}",
+                           lambda: self._describe(kind, name, ns))
+            menu.addSeparator()
+        menu.addAction("📋  Copy Message",
+                       lambda: QApplication.clipboard().setText(meta.get("message", "")))
+        menu.exec_(self.event_list.viewport().mapToGlobal(pos))
 
     # ── Describe helper ───────────────────────────────────────
     def _describe(self, kind: str, name: str, ns: str):
