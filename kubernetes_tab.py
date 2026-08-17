@@ -26,6 +26,7 @@ from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
     StatefulSetCardWidget, DaemonSetCardWidget, EventCardWidget,
+    HPACardWidget,
 )
 from utils import (
     append_terminal_html, append_terminal_text,
@@ -198,6 +199,7 @@ class KubernetesTab(QWidget):
         self._build_deployments_tab()
         self._build_statefulsets_tab()
         self._build_daemonsets_tab()
+        self._build_hpa_tab()
         self._build_services_tab()
         self._build_ingress_tab()
         self._build_config_tab()
@@ -513,6 +515,58 @@ class KubernetesTab(QWidget):
         )
         lay.addWidget(self.ds_list)
         self.sub_tabs.addTab(w, "🛡  DaemonSets")
+
+    def _build_hpa_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        tb = QHBoxLayout()
+        tb.setContentsMargins(10, 6, 10, 6)
+        tb.setSpacing(8)
+        self.hpa_filter = QLineEdit()
+        self.hpa_filter.setPlaceholderText("🔍  Filter autoscalers…")
+        self.hpa_filter.setMaximumWidth(200)
+        self.hpa_filter.textChanged.connect(self._filter_hpas)
+        tb.addWidget(self.hpa_filter)
+
+        self.hpa_count_lbl = QLabel("")
+        tb.addWidget(self.hpa_count_lbl)
+        tb.addStretch()
+
+        # Read-only status view — no Scale button, since an HPA's whole
+        # point is that it decides replica counts itself. Describe/Delete
+        # are still useful (Delete to hand control back to a manual
+        # `kubectl scale`, Describe to see the full condition history
+        # behind why it hasn't scaled).
+        self.hpa_desc_btn = self._toolbar_btn("📋  Describe")
+        self.hpa_desc_btn.clicked.connect(self._hpa_describe)
+        tb.addWidget(self.hpa_desc_btn)
+
+        self.hpa_del_btn = self._toolbar_btn("🗑  Delete", object_name="danger")
+        self.hpa_del_btn.clicked.connect(self._hpa_delete)
+        tb.addWidget(self.hpa_del_btn)
+
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        tb_widget.setLayout(tb)
+        lay.addWidget(tb_widget)
+        self.hpa_toolbar = tb_widget
+
+        self.hpa_list = QListWidget()
+        self.hpa_list.setSpacing(6)
+        self.hpa_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.hpa_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.hpa_list.customContextMenuRequested.connect(self._hpa_ctx_menu)
+        self.hpa_list.itemDoubleClicked.connect(self._on_hpa_double_click)
+        self.hpa_list.currentItemChanged.connect(self._on_hpa_selection_changed)
+        self.hpa_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.hpa_list)
+        self.sub_tabs.addTab(w, "📈  HPA")
 
     def _build_services_tab(self):
         w = QWidget()
@@ -1001,6 +1055,7 @@ class KubernetesTab(QWidget):
         toolbar_style = f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
         for bar in (getattr(self, "pods_toolbar", None), getattr(self, "deploy_toolbar", None),
                     getattr(self, "sts_toolbar", None), getattr(self, "ds_toolbar", None),
+                    getattr(self, "hpa_toolbar", None),
                     getattr(self, "svc_toolbar", None), getattr(self, "ing_toolbar", None),
                     getattr(self, "events_toolbar", None), getattr(self, "tunnel_toolbar", None)):
             if bar is not None:
@@ -1153,6 +1208,9 @@ class KubernetesTab(QWidget):
         self.ds_list.clear()
         self.ds_count_lbl.setText("")
         self.ds_count_lbl.setStyleSheet("")
+        self.hpa_list.clear()
+        self.hpa_count_lbl.setText("")
+        self.hpa_count_lbl.setStyleSheet("")
         self.svc_list.clear()
         self.svc_count_lbl.setText("")
         self.svc_count_lbl.setStyleSheet("")
@@ -1178,11 +1236,12 @@ class KubernetesTab(QWidget):
         elif idx == 1: self._load_deployments()
         elif idx == 2: self._load_statefulsets()
         elif idx == 3: self._load_daemonsets()
-        elif idx == 4: self._load_services()
-        elif idx == 5: self._load_ingress()
-        elif idx == 6: self._load_config_resources()
-        elif idx == 7: self._load_events()
-        elif idx == 8: self._refresh_tunnel_status()
+        elif idx == 4: self._load_hpas()
+        elif idx == 5: self._load_services()
+        elif idx == 6: self._load_ingress()
+        elif idx == 7: self._load_config_resources()
+        elif idx == 8: self._load_events()
+        elif idx == 9: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
     # `kubectl get pods -o wide` renders the RESTARTS column as a plain
@@ -1754,6 +1813,179 @@ class KubernetesTab(QWidget):
         menu.addSeparator()
         menu.addAction("🗑  Delete", self._ds_delete)
         menu.exec_(self.ds_list.viewport().mapToGlobal(pos))
+
+    # ── HorizontalPodAutoscalers ─────────────────────────────
+    @staticmethod
+    def _hpa_metric_value(d: dict) -> str:
+        """Pull whichever value field a v2 HPA metric target/current dict
+        actually carries — Resource/Pods/Object/External metrics all
+        share this shape but populate different keys of it."""
+        if not d:
+            return "-"
+        if "averageUtilization" in d:
+            return f"{d['averageUtilization']}%"
+        if "averageValue" in d:
+            return str(d["averageValue"])
+        if "value" in d:
+            return str(d["value"])
+        return "-"
+
+    @classmethod
+    def _hpa_metric_key_name(cls, m: dict, side: str):
+        """(type_key, metric_name) for one metric entry — 'side' is
+        'target' (from spec.metrics) or 'current' (from status.currentMetrics).
+        Matching spec vs current entries by (type, name) is how a target %
+        gets paired with its current % below."""
+        mtype = m.get("type", "")
+        key = mtype.lower()
+        sub = m.get(key, {}) or {}
+        name = (sub.get("metric") or {}).get("name") or sub.get("name") or mtype
+        return (key, name), cls._hpa_metric_value(sub.get(side))
+
+    def _load_hpas(self):
+        self._run_cmd(f"kubectl get hpa {self._ns_flag()} -o json 2>&1", self._populate_hpas)
+
+    def _populate_hpas(self, out: str):
+        self.hpa_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+
+        total = 0
+        healthy_count = 0
+        for it in items:
+            spec   = it.get("spec") or {}
+            status = it.get("status") or {}
+            ref    = spec.get("scaleTargetRef") or {}
+
+            metrics_spec    = spec.get("metrics") or []
+            current_metrics = status.get("currentMetrics") or []
+
+            # autoscaling/v1 HPAs (older clusters) don't have spec.metrics
+            # at all — just a single implicit CPU-utilization target — so
+            # synthesize the same one-entry shape the v2 path below expects.
+            if not metrics_spec and spec.get("targetCPUUtilizationPercentage") is not None:
+                metrics_spec = [{"type": "Resource", "resource": {
+                    "name": "cpu", "target": {"averageUtilization": spec["targetCPUUtilizationPercentage"]}}}]
+                cur_cpu = status.get("currentCPUUtilizationPercentage")
+                if cur_cpu is not None:
+                    current_metrics = [{"type": "Resource", "resource": {
+                        "name": "cpu", "current": {"averageUtilization": cur_cpu}}}]
+
+            current_by_key = {}
+            for m in current_metrics:
+                key, val = self._hpa_metric_key_name(m, "current")
+                current_by_key[key] = val
+
+            metrics = []
+            has_unknown = False
+            for m in metrics_spec:
+                key, target_val = self._hpa_metric_key_name(m, "target")
+                current_val = current_by_key.get(key, "-")
+                if current_val == "-":
+                    has_unknown = True
+                metrics.append({"label": key[1], "current": current_val, "target": target_val})
+
+            conditions = status.get("conditions") or []
+            scaling_blocked = any(
+                c.get("status") == "False" and c.get("type") in ("AbleToScale", "ScalingActive")
+                for c in conditions
+            )
+            healthy = not has_unknown and not scaling_blocked
+
+            meta = {
+                "namespace":        (it.get("metadata") or {}).get("namespace", ""),
+                "name":             (it.get("metadata") or {}).get("name", ""),
+                "reference":        f"{ref.get('kind', '')}/{ref.get('name', '')}",
+                "min_replicas":     spec.get("minReplicas", "-"),
+                "max_replicas":     spec.get("maxReplicas", "-"),
+                "current_replicas": status.get("currentReplicas", "-"),
+                "desired_replicas": status.get("desiredReplicas", "-"),
+                "metrics":          metrics,
+                "age":              self._humanize_age((it.get("metadata") or {}).get("creationTimestamp", "")),
+                "healthy":          healthy,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, HPACardWidget.CARD_HEIGHT))
+            self.hpa_list.addItem(item)
+            self.hpa_list.setItemWidget(item, HPACardWidget(meta, all_ns))
+            total += 1
+            if healthy:
+                healthy_count += 1
+
+        if total == 0:
+            color_key = "TEXT_MUTED"
+        elif healthy_count == total:
+            color_key = "SUCCESS"
+        elif healthy_count == 0:
+            color_key = "DANGER"
+        else:
+            color_key = "WARNING"
+        self._set_count_badge(self.hpa_count_lbl, f"{total} autoscaler{'s' if total != 1 else ''} · {healthy_count} healthy", color_key)
+        self._filter_hpas(self.hpa_filter.text())
+
+    def _filter_hpas(self, text: str):
+        q = text.lower()
+        for i in range(self.hpa_list.count()):
+            item = self.hpa_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            searchable = f"{meta.get('name', '')} {meta.get('reference', '')}".lower()
+            item.setHidden(q not in searchable)
+
+    def _on_hpa_selection_changed(self, current, previous):
+        if previous is not None:
+            w = self.hpa_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.hpa_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _on_hpa_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("hpa", meta.get("name"), meta.get("namespace") or "default")
+
+    def _selected_hpa(self) -> tuple:  # (Optional[str], str)
+        item = self.hpa_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select an autoscaler first.")
+            return None, ""
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
+
+    def _hpa_describe(self):
+        name, ns = self._selected_hpa()
+        if name:
+            self._describe("hpa", name, ns)
+
+    def _hpa_delete(self):
+        name, ns = self._selected_hpa()
+        if not name:
+            return
+        if QMessageBox.question(self, "Delete HPA",
+                                f'Delete autoscaler "{name}"?\nThe target workload keeps running at its '
+                                f'current replica count, but nothing will scale it automatically anymore.',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl delete hpa {name} -n {ns} 2>&1",
+                          lambda o: (self._log(o), self._load_hpas()))
+
+    def _hpa_ctx_menu(self, pos):
+        item = self.hpa_list.itemAt(pos)
+        if not item:
+            return
+        self.hpa_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        menu = QMenu(self)
+        menu.addAction("📄  Describe", lambda: self._describe("hpa", name, ns))
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._hpa_delete)
+        menu.exec_(self.hpa_list.viewport().mapToGlobal(pos))
 
     # ── Services ──────────────────────────────────────────────
     def _load_services(self):

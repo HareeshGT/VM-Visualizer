@@ -360,6 +360,71 @@ class EventCardWidget(_CardBase):
         outer.addWidget(msg_lbl)
 
 
+def _metric_scalar(d: dict) -> str:
+    """Pull whichever value field a v2 HPA metric target/current dict
+    actually carries — different metric types (Resource/Pods/Object/
+    External) populate different keys of the same shape."""
+    if not d:
+        return "-"
+    if "averageUtilization" in d:
+        return f"{d['averageUtilization']}%"
+    if "averageValue" in d:
+        return str(d["averageValue"])
+    if "value" in d:
+        return str(d["value"])
+    return "-"
+
+
+class HPACardWidget(_CardBase):
+    """One HorizontalPodAutoscaler, as a card. `meta` matches what
+    _populate_hpas builds: namespace, name, reference, min_replicas,
+    max_replicas, current_replicas, desired_replicas, metrics (list of
+    {label, current, target}), age, healthy."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        healthy = meta.get("healthy", True)
+        super().__init__(T["SUCCESS"] if healthy else T["WARNING"], parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        cur = meta.get("current_replicas", "-")
+        mn  = meta.get("min_replicas", "-")
+        mx  = meta.get("max_replicas", "-")
+        top.addWidget(_pill(f"{cur} pods  ({mn}–{mx})", "SUCCESS" if healthy else "WARNING"))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        ref_lbl = _meta_label(f"→ {meta.get('reference', '-')}")
+        bottom.addWidget(ref_lbl)
+
+        metrics = meta.get("metrics") or []
+        metrics_text = " · ".join(
+            f"{m['label']} {m['current']}/{m['target']}" for m in metrics
+        ) or "no metrics"
+        metrics_lbl = _meta_label(metrics_text)
+        metrics_lbl.setToolTip(metrics_text)
+        metrics_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(metrics_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
 def _svc_type_color_key(stype: str) -> str:
     s = (stype or "").lower()
     if s == "loadbalancer":
