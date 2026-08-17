@@ -203,6 +203,105 @@ class DeploymentCardWidget(_CardBase):
         outer.addLayout(bottom)
 
 
+class StatefulSetCardWidget(_CardBase):
+    """One StatefulSet, as a card. `meta` matches what _populate_statefulsets
+    builds: namespace, name, ready, age, images.
+
+    Same shape as DeploymentCardWidget minus up-to-date/available (StatefulSets
+    don't report those columns) — kept as its own class rather than reusing
+    DeploymentCardWidget so a future divergence (e.g. showing the update
+    strategy or current/update revision) doesn't have to fight a shared
+    Deployment-specific layout."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        ready    = meta.get("ready", "")
+        ready_ok = _ratio_ok(ready)
+        super().__init__(T["SUCCESS"] if ready_ok else T["WARNING"], parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        if ready:
+            top.addWidget(_pill(f"Ready {ready}", "SUCCESS" if ready_ok else "WARNING"))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        images_lbl = _meta_label(meta.get("images", "-") or "-")
+        images_lbl.setToolTip(meta.get("images", ""))
+        images_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(images_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
+class DaemonSetCardWidget(_CardBase):
+    """One DaemonSet, as a card. `meta` matches what _populate_daemonsets
+    builds: namespace, name, desired, current, ready, up_to_date, available,
+    node_selector, age, images.
+
+    DaemonSets have no replica count to scale — "ready" here means "ready
+    on how many of the nodes it's scheduled to", so the accent still reads
+    off ready vs desired the same way Deployments/StatefulSets do."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        desired  = meta.get("desired", "0")
+        ready    = meta.get("ready", "0")
+        ready_ok = (desired == ready) and desired not in ("", "0")
+        # A DaemonSet with desired=0 (e.g. node selector matches nothing
+        # right now) isn't "broken" — don't paint it as a warning.
+        accent = T["SUCCESS"] if (ready_ok or desired == "0") else T["WARNING"]
+        super().__init__(accent, parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        top.addWidget(_pill(f"Ready {ready}/{desired}", "SUCCESS" if (ready_ok or desired == "0") else "WARNING"))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        bottom.addWidget(_meta_label(f"Current {meta.get('current', '-')}"))
+        bottom.addWidget(_meta_label(f"Up-to-date {meta.get('up_to_date', '-')}"))
+        bottom.addWidget(_meta_label(f"Available {meta.get('available', '-')}"))
+
+        node_sel = meta.get("node_selector", "-") or "-"
+        ns_lbl = _meta_label(node_sel)
+        ns_lbl.setToolTip(node_sel)
+        ns_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(ns_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
 def _svc_type_color_key(stype: str) -> str:
     s = (stype or "").lower()
     if s == "loadbalancer":

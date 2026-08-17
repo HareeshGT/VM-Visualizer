@@ -24,6 +24,7 @@ from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog, Con
 from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
+    StatefulSetCardWidget, DaemonSetCardWidget,
 )
 from utils import (
     append_terminal_html, append_terminal_text,
@@ -192,6 +193,8 @@ class KubernetesTab(QWidget):
 
         self._build_pods_tab()
         self._build_deployments_tab()
+        self._build_statefulsets_tab()
+        self._build_daemonsets_tab()
         self._build_services_tab()
         self._build_ingress_tab()
         self._build_config_tab()
@@ -394,6 +397,118 @@ class KubernetesTab(QWidget):
         )
         lay.addWidget(self.deploy_list)
         self.sub_tabs.addTab(w, "🚀  Deployments")
+
+    def _build_statefulsets_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        tb = QHBoxLayout()
+        tb.setContentsMargins(10, 6, 10, 6)
+        tb.setSpacing(8)
+        self.sts_filter = QLineEdit()
+        self.sts_filter.setPlaceholderText("🔍  Filter statefulsets…")
+        self.sts_filter.setMaximumWidth(200)
+        self.sts_filter.textChanged.connect(self._filter_statefulsets)
+        tb.addWidget(self.sts_filter)
+
+        self.sts_count_lbl = QLabel("")
+        tb.addWidget(self.sts_count_lbl)
+        tb.addStretch()
+
+        self.sts_scale_spin = QSpinBox()
+        self.sts_scale_spin.setRange(0, 100)
+        self.sts_scale_spin.setValue(1)
+        self.sts_scale_spin.setFixedWidth(70)
+        self.sts_scale_spin.setToolTip("Replicas")
+        tb.addWidget(QLabel("Replicas:"))
+        tb.addWidget(self.sts_scale_spin)
+
+        for label, obj, slot in [
+            ("⇅  Scale",     "sts_scale_btn",   self._sts_scale),
+            ("↺  Restart",   "sts_restart_btn", self._sts_restart),
+            ("📋  Describe",  "sts_desc_btn",    self._sts_describe),
+            ("🗑  Delete",    "sts_del_btn",     self._sts_delete),
+        ]:
+            obj_name = "danger" if "Delete" in label else None
+            btn = self._toolbar_btn(label, object_name=obj_name)
+            setattr(self, obj, btn)
+            btn.clicked.connect(slot)
+            tb.addWidget(btn)
+
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        tb_widget.setLayout(tb)
+        lay.addWidget(tb_widget)
+        self.sts_toolbar = tb_widget
+
+        self.sts_list = QListWidget()
+        self.sts_list.setSpacing(6)
+        self.sts_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.sts_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sts_list.customContextMenuRequested.connect(self._sts_ctx_menu)
+        self.sts_list.itemClicked.connect(self._on_sts_click)
+        self.sts_list.itemDoubleClicked.connect(self._on_sts_double_click)
+        self.sts_list.currentItemChanged.connect(self._on_sts_selection_changed)
+        self.sts_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.sts_list)
+        self.sub_tabs.addTab(w, "📚  StatefulSets")
+
+    def _build_daemonsets_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        tb = QHBoxLayout()
+        tb.setContentsMargins(10, 6, 10, 6)
+        tb.setSpacing(8)
+        self.ds_filter = QLineEdit()
+        self.ds_filter.setPlaceholderText("🔍  Filter daemonsets…")
+        self.ds_filter.setMaximumWidth(200)
+        self.ds_filter.textChanged.connect(self._filter_daemonsets)
+        tb.addWidget(self.ds_filter)
+
+        self.ds_count_lbl = QLabel("")
+        tb.addWidget(self.ds_count_lbl)
+        tb.addStretch()
+
+        # No Scale control — DaemonSets run exactly one pod per matching
+        # node, so "replica count" isn't a thing a person can set here.
+        for label, obj, slot in [
+            ("↺  Restart",   "ds_restart_btn", self._ds_restart),
+            ("📋  Describe",  "ds_desc_btn",    self._ds_describe),
+            ("🗑  Delete",    "ds_del_btn",     self._ds_delete),
+        ]:
+            obj_name = "danger" if "Delete" in label else None
+            btn = self._toolbar_btn(label, object_name=obj_name)
+            setattr(self, obj, btn)
+            btn.clicked.connect(slot)
+            tb.addWidget(btn)
+
+        tb_widget = QWidget()
+        tb_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        tb_widget.setLayout(tb)
+        lay.addWidget(tb_widget)
+        self.ds_toolbar = tb_widget
+
+        self.ds_list = QListWidget()
+        self.ds_list.setSpacing(6)
+        self.ds_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ds_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ds_list.customContextMenuRequested.connect(self._ds_ctx_menu)
+        self.ds_list.itemDoubleClicked.connect(self._on_ds_double_click)
+        self.ds_list.currentItemChanged.connect(self._on_ds_selection_changed)
+        self.ds_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.ds_list)
+        self.sub_tabs.addTab(w, "🛡  DaemonSets")
 
     def _build_services_tab(self):
         w = QWidget()
@@ -835,6 +950,7 @@ class KubernetesTab(QWidget):
         )
         toolbar_style = f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
         for bar in (getattr(self, "pods_toolbar", None), getattr(self, "deploy_toolbar", None),
+                    getattr(self, "sts_toolbar", None), getattr(self, "ds_toolbar", None),
                     getattr(self, "svc_toolbar", None), getattr(self, "ing_toolbar", None),
                     getattr(self, "tunnel_toolbar", None)):
             if bar is not None:
@@ -981,6 +1097,12 @@ class KubernetesTab(QWidget):
         self.pod_count_lbl.setStyleSheet("")
         self.deploy_count_lbl.setText("")
         self.deploy_count_lbl.setStyleSheet("")
+        self.sts_list.clear()
+        self.sts_count_lbl.setText("")
+        self.sts_count_lbl.setStyleSheet("")
+        self.ds_list.clear()
+        self.ds_count_lbl.setText("")
+        self.ds_count_lbl.setStyleSheet("")
         self.svc_list.clear()
         self.svc_count_lbl.setText("")
         self.svc_count_lbl.setStyleSheet("")
@@ -998,10 +1120,12 @@ class KubernetesTab(QWidget):
         idx = self.sub_tabs.currentIndex()
         if   idx == 0: self._load_pods()
         elif idx == 1: self._load_deployments()
-        elif idx == 2: self._load_services()
-        elif idx == 3: self._load_ingress()
-        elif idx == 4: self._load_config_resources()
-        elif idx == 5: self._refresh_tunnel_status()
+        elif idx == 2: self._load_statefulsets()
+        elif idx == 3: self._load_daemonsets()
+        elif idx == 4: self._load_services()
+        elif idx == 5: self._load_ingress()
+        elif idx == 6: self._load_config_resources()
+        elif idx == 7: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
     # `kubectl get pods -o wide` renders the RESTARTS column as a plain
@@ -1320,6 +1444,259 @@ class KubernetesTab(QWidget):
                                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             self._run_cmd(f"kubectl delete deployment {dep} -n {ns} 2>&1",
                           lambda o: (self._log(o), self._load_deployments()))
+
+    # ── StatefulSets ──────────────────────────────────────────
+    def _load_statefulsets(self):
+        self._run_cmd(f"kubectl get statefulsets {self._ns_flag()} -o wide 2>&1",
+                      self._populate_statefulsets)
+
+    def _populate_statefulsets(self, out: str):
+        self.sts_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        total = 0
+        ready_count = 0
+        for line in out.strip().splitlines()[1:]:
+            parts = line.split()
+            # `kubectl get statefulsets -o wide` columns: NAME READY AGE
+            # CONTAINERS IMAGES (NAMESPACE prepended in --all-namespaces).
+            if all_ns:
+                if len(parts) < 4:
+                    continue
+                ns, name, ready, age = parts[:4]
+                imgs = " | ".join(parts[4:]) if len(parts) > 4 else "-"
+            else:
+                if len(parts) < 3:
+                    continue
+                ns = self._current_ns or "default"
+                name, ready, age = parts[:3]
+                imgs = " | ".join(parts[3:]) if len(parts) > 3 else "-"
+            meta = {
+                "namespace": ns, "name": name, "ready": ready,
+                "age": age, "images": imgs,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, StatefulSetCardWidget.CARD_HEIGHT))
+            self.sts_list.addItem(item)
+            self.sts_list.setItemWidget(item, StatefulSetCardWidget(meta, all_ns))
+            total += 1
+            try:
+                cur, desired = ready.split("/")
+                if cur == desired:
+                    ready_count += 1
+            except Exception:
+                pass
+        if total == 0:
+            color_key = "TEXT_MUTED"
+        elif ready_count == total:
+            color_key = "SUCCESS"
+        elif ready_count == 0:
+            color_key = "DANGER"
+        else:
+            color_key = "WARNING"
+        self._set_count_badge(self.sts_count_lbl, f"{total} statefulset{'s' if total != 1 else ''} · {ready_count} ready", color_key)
+        self._filter_statefulsets(self.sts_filter.text())
+
+    def _on_sts_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        try:
+            _, desired = meta.get("ready", "").split("/")
+            self.sts_scale_spin.setValue(int(desired))
+        except Exception:
+            pass
+
+    def _on_sts_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("statefulset", meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_sts_selection_changed(self, current, previous):
+        if previous is not None:
+            w = self.sts_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.sts_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _filter_statefulsets(self, text: str):
+        q = text.lower()
+        for i in range(self.sts_list.count()):
+            item = self.sts_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
+
+    def _selected_sts(self) -> tuple:  # (Optional[str], str)
+        item = self.sts_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select a statefulset first.")
+            return None, ""
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
+
+    def _sts_scale(self):
+        sts, ns = self._selected_sts()
+        if not sts:
+            return
+        replicas = self.sts_scale_spin.value()
+        if QMessageBox.question(self, "Scale", f'Scale "{sts}" to {replicas} replica(s)?',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl scale statefulset {sts} -n {ns} --replicas={replicas} 2>&1",
+                          lambda o: (self._log(o), self._load_statefulsets()))
+
+    def _sts_restart(self):
+        sts, ns = self._selected_sts()
+        if sts:
+            self._run_cmd(f"kubectl rollout restart statefulset/{sts} -n {ns} 2>&1",
+                          lambda o: (self._log(o), self._load_statefulsets()))
+
+    def _sts_describe(self):
+        sts, ns = self._selected_sts()
+        if sts:
+            self._describe("statefulset", sts, ns)
+
+    def _sts_delete(self):
+        sts, ns = self._selected_sts()
+        if not sts:
+            return
+        if QMessageBox.question(self, "Delete StatefulSet",
+                                f'Delete statefulset "{sts}"?\nThis will remove all its pods.',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl delete statefulset {sts} -n {ns} 2>&1",
+                          lambda o: (self._log(o), self._load_statefulsets()))
+
+    def _sts_ctx_menu(self, pos):
+        item = self.sts_list.itemAt(pos)
+        if not item:
+            return
+        self.sts_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        menu = QMenu(self)
+        menu.addAction("↺  Restart",  self._sts_restart)
+        menu.addAction("📄  Describe", lambda: self._describe("statefulset", name, ns))
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._sts_delete)
+        menu.exec_(self.sts_list.viewport().mapToGlobal(pos))
+
+    # ── DaemonSets ────────────────────────────────────────────
+    def _load_daemonsets(self):
+        self._run_cmd(f"kubectl get daemonsets {self._ns_flag()} -o wide 2>&1",
+                      self._populate_daemonsets)
+
+    def _populate_daemonsets(self, out: str):
+        self.ds_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        total = 0
+        ready_count = 0
+        for line in out.strip().splitlines()[1:]:
+            parts = line.split()
+            # `kubectl get daemonsets -o wide` columns: NAME DESIRED CURRENT
+            # READY UP-TO-DATE AVAILABLE NODE-SELECTOR AGE CONTAINERS IMAGES
+            # SELECTOR (NAMESPACE prepended in --all-namespaces). NODE-SELECTOR
+            # renders as a single space-free token ("<none>" or a real
+            # selector expression), so straight positional split() still
+            # lines the fixed columns up correctly.
+            if all_ns:
+                if len(parts) < 9:
+                    continue
+                ns, name, desired, current, ready, upd, avail, node_sel, age = parts[:9]
+                imgs = " | ".join(parts[9:]) if len(parts) > 9 else "-"
+            else:
+                if len(parts) < 8:
+                    continue
+                ns = self._current_ns or "default"
+                name, desired, current, ready, upd, avail, node_sel, age = parts[:8]
+                imgs = " | ".join(parts[8:]) if len(parts) > 8 else "-"
+            meta = {
+                "namespace": ns, "name": name, "desired": desired, "current": current,
+                "ready": ready, "up_to_date": upd, "available": avail,
+                "node_selector": node_sel, "age": age, "images": imgs,
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, meta)
+            item.setSizeHint(QSize(0, DaemonSetCardWidget.CARD_HEIGHT))
+            self.ds_list.addItem(item)
+            self.ds_list.setItemWidget(item, DaemonSetCardWidget(meta, all_ns))
+            total += 1
+            if desired == ready or desired == "0":
+                ready_count += 1
+        if total == 0:
+            color_key = "TEXT_MUTED"
+        elif ready_count == total:
+            color_key = "SUCCESS"
+        elif ready_count == 0:
+            color_key = "DANGER"
+        else:
+            color_key = "WARNING"
+        self._set_count_badge(self.ds_count_lbl, f"{total} daemonset{'s' if total != 1 else ''} · {ready_count} ready", color_key)
+        self._filter_daemonsets(self.ds_filter.text())
+
+    def _on_ds_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        self._describe("daemonset", meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_ds_selection_changed(self, current, previous):
+        if previous is not None:
+            w = self.ds_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.ds_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _filter_daemonsets(self, text: str):
+        q = text.lower()
+        for i in range(self.ds_list.count()):
+            item = self.ds_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
+
+    def _selected_ds(self) -> tuple:  # (Optional[str], str)
+        item = self.ds_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select a daemonset first.")
+            return None, ""
+        meta = item.data(Qt.UserRole) or {}
+        return meta.get("name"), meta.get("namespace") or "default"
+
+    def _ds_restart(self):
+        ds, ns = self._selected_ds()
+        if ds:
+            self._run_cmd(f"kubectl rollout restart daemonset/{ds} -n {ns} 2>&1",
+                          lambda o: (self._log(o), self._load_daemonsets()))
+
+    def _ds_describe(self):
+        ds, ns = self._selected_ds()
+        if ds:
+            self._describe("daemonset", ds, ns)
+
+    def _ds_delete(self):
+        ds, ns = self._selected_ds()
+        if not ds:
+            return
+        if QMessageBox.question(self, "Delete DaemonSet",
+                                f'Delete daemonset "{ds}"?\nThis will remove it from every node.',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl delete daemonset {ds} -n {ns} 2>&1",
+                          lambda o: (self._log(o), self._load_daemonsets()))
+
+    def _ds_ctx_menu(self, pos):
+        item = self.ds_list.itemAt(pos)
+        if not item:
+            return
+        self.ds_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        menu = QMenu(self)
+        menu.addAction("↺  Restart",  self._ds_restart)
+        menu.addAction("📄  Describe", lambda: self._describe("daemonset", name, ns))
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._ds_delete)
+        menu.exec_(self.ds_list.viewport().mapToGlobal(pos))
 
     # ── Services ──────────────────────────────────────────────
     def _load_services(self):
