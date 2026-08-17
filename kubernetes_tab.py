@@ -1716,6 +1716,29 @@ class KubernetesTab(QWidget):
         self.sub_tabs.addTab(w, "🔀  Tunnels")
         # self._load_tunnel_csv()
 
+        # Apply whatever tab-visibility choices were saved in Settings
+        # (defaults to "everything visible" the first time the app runs).
+        self._apply_saved_hidden_tabs()
+
+    # ── Tab visibility (Settings → Kubernetes Tabs) ────────────
+    def visible_tab_titles(self) -> list:
+        """The exact tab-bar strings currently in sub_tabs, in order —
+        used by SettingsDialog to build its show/hide checklist and as
+        the stable keys stored in settings.json."""
+        return [self.sub_tabs.tabText(i) for i in range(self.sub_tabs.count())]
+
+    def apply_hidden_tabs(self, hidden_titles):
+        """Hide/show sub-tabs by title. Safe to call at any time (e.g.
+        right after the user saves new choices in Settings) — QTabWidget
+        keeps a hidden tab's contents alive, it just isn't selectable
+        from the tab bar."""
+        hidden = set(hidden_titles or [])
+        for i in range(self.sub_tabs.count()):
+            self.sub_tabs.setTabVisible(i, self.sub_tabs.tabText(i) not in hidden)
+
+    def _apply_saved_hidden_tabs(self):
+        self.apply_hidden_tabs(load_settings().get("k8s_hidden_tabs", []))
+
     # ── Theme refresh ─────────────────────────────────────────
     def apply_theme(self):
         self.ctrl_bar.setStyleSheet(

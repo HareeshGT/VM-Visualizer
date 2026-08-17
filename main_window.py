@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, QSize, QPropertyAnimation, QEasingCurve, QRect, QPoint,
-    QParallelAnimationGroup,
+    QParallelAnimationGroup, QTimer,
 )
 from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
 
@@ -34,6 +34,9 @@ from terminal_widget import TerminalWidget
 from kubernetes_tab import KubernetesTab
 from dashboard_tab import DashboardTab
 from theme_picker import ThemePicker
+from settings_dialog import SettingsDialog
+from lock_screen import AppLockDialog
+import security
 
 # Extensions that can be executed remotely
 _EXECUTABLE_EXTS = {
@@ -123,6 +126,10 @@ class EC2FileManager(QMainWindow):
         self._tab_slide_ready    = True
         self._set_connected(False)
         self.terminal.show_prompt("(not connected)$ ")
+
+        self._inactivity_watcher = None
+        self._lock_dlg_open      = False
+        self._setup_app_lock()
 
     # ── UI construction ───────────────────────────────────────
     def _build_ui(self):
@@ -224,6 +231,10 @@ class EC2FileManager(QMainWindow):
         self.theme_picker = ThemePicker(_themes.CURRENT_THEME)
         self.theme_picker.theme_changed.connect(self._change_theme)
         tb.addWidget(self.theme_picker)
+
+        self.act_settings = _icon_btn("⚙", "Settings")
+        self.act_settings.clicked.connect(self._open_settings)
+        tb.addWidget(self.act_settings)
         tb.addWidget(_sep())  # always-visible sep before connect buttons
 
         tb.addStretch()
@@ -506,6 +517,58 @@ class EC2FileManager(QMainWindow):
             self._refresh(push_history=True)
 
         self.status.showMessage("Theme changed to {}".format(theme_name))
+
+    # ── Settings ──────────────────────────────────────────────
+    def _open_settings(self):
+        dlg = SettingsDialog(self, k8s_tab_titles=self.k8s_tab.visible_tab_titles())
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        self.k8s_tab.apply_hidden_tabs(dlg.hidden_k8s_tabs())
+
+        lock_settings = security.get_lock_settings()
+        if self._inactivity_watcher:
+            self._inactivity_watcher.set_minutes(lock_settings["autolock_minutes"])
+            if lock_settings["enabled"]:
+                self._inactivity_watcher.resume()
+            else:
+                self._inactivity_watcher.suspend()
+
+        self.status.showMessage("Settings saved")
+
+    # ── App lock (security) ─────────────────────────────────────
+    def _setup_app_lock(self):
+        """Installs the app-wide inactivity watcher and, if the app lock
+        is enabled, shows the lock screen once the window has finished
+        constructing (so the modal dialog has something to sit on top
+        of)."""
+        settings = security.get_lock_settings()
+        self._inactivity_watcher = security.InactivityWatcher(settings["autolock_minutes"])
+        self._inactivity_watcher.idle_timeout.connect(self._show_lock_screen)
+        QApplication.instance().installEventFilter(self._inactivity_watcher)
+
+        if settings["enabled"] and settings["pin_hash"]:
+            QTimer.singleShot(0, self._show_lock_screen)
+        else:
+            self._inactivity_watcher.suspend()
+
+    def _show_lock_screen(self):
+        # Auto-lock can fire while a previous lock dialog is still being
+        # torn down, or while the app lock got disabled mid-timeout —
+        # guard against showing it twice or when there's nothing to check.
+        settings = security.get_lock_settings()
+        if self._lock_dlg_open or not settings["enabled"] or not settings["pin_hash"]:
+            return
+        self._lock_dlg_open = True
+        if self._inactivity_watcher:
+            self._inactivity_watcher.suspend()
+        try:
+            dlg = AppLockDialog(self)
+            dlg.exec_()  # blocks until the correct PIN is entered, or the app quits
+        finally:
+            self._lock_dlg_open = False
+            if self._inactivity_watcher and security.get_lock_settings()["enabled"]:
+                self._inactivity_watcher.resume()
 
     # ── List header ───────────────────────────────────────────
     def _build_list_header(self):
