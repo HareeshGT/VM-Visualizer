@@ -151,6 +151,73 @@ class ConnectWorker(QThread):
             self.error.emit(str(e))
 
 
+class ConnectionHealthWorker(QThread):
+    """Watches the live SSH transport and warns the UI before the session
+    is actually gone, instead of the app only finding out when the next
+    real operation (file listing, command, tunnel restart...) fails.
+
+    ConnectWorker already calls transport.set_keepalive(15), but that runs
+    entirely inside paramiko's own background thread and gives the app no
+    visible signal either way — it silently keeps the socket alive, or
+    silently lets it die. This worker adds an observable heartbeat on top:
+    every INTERVAL seconds it checks transport.is_active() and sends a
+    harmless SSH-level "ignore" packet, on a background thread so it never
+    blocks the UI. One missed heartbeat is reported as `at_risk` (an early
+    warning — could be a transient blip); LOST_THRESHOLD consecutive
+    misses, or transport.is_active() going False outright, is reported as
+    `lost`.
+    """
+
+    at_risk   = pyqtSignal(str)   # first missed heartbeat — may be transient
+    recovered = pyqtSignal()      # heartbeats resumed after being at_risk
+    lost      = pyqtSignal(str)   # transport confirmed dead
+
+    INTERVAL       = 10   # seconds between heartbeats
+    LOST_THRESHOLD = 3    # consecutive missed heartbeats before declaring it lost
+
+    def __init__(self, ssh):
+        super().__init__()
+        self.ssh = ssh
+        self._stop = threading.Event()
+        self.finished.connect(self.deleteLater)
+
+    def stop(self):
+        # Unblocks the wait() below immediately so the loop exits before
+        # its next heartbeat, instead of firing one more check (and
+        # possibly a stray `lost` signal) after the caller has already
+        # torn down the connection on purpose.
+        self._stop.set()
+
+    def run(self):
+        fail_count   = 0
+        was_at_risk  = False
+        while not self._stop.wait(self.INTERVAL):
+            try:
+                transport = self.ssh.get_transport()
+            except Exception:
+                transport = None
+
+            if transport is None or not transport.is_active():
+                self.lost.emit("SSH transport is no longer active.")
+                return
+
+            try:
+                transport.send_ignore()
+            except Exception as e:
+                fail_count += 1
+                if fail_count >= self.LOST_THRESHOLD:
+                    self.lost.emit(str(e))
+                    return
+                if fail_count == 1:
+                    self.at_risk.emit(str(e))
+                    was_at_risk = True
+            else:
+                if was_at_risk:
+                    self.recovered.emit()
+                    was_at_risk = False
+                fail_count = 0
+
+
 class CommandWorker(QThread):
     """Runs a single SSH command in a background thread."""
 

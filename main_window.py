@@ -25,7 +25,7 @@ import themes as _themes
 from themes import T, THEMES, apply_theme_vars, build_qss, apply_qss_to, save_settings
 from utils import classify, icon_for, size_fmt, add_recent_instance, monospace_font
 from sudo_fs import SudoFS
-from workers import CommandWorker, ConnectWorker, track_worker
+from workers import CommandWorker, ConnectWorker, ConnectionHealthWorker, track_worker
 from dialogs import ConnectDialog, FileTransferDialog, FileEditorDialog, FileExecDialog, SearchDialog, ConnectingDialog, MediaPlayerDialog
 from sidebar import Sidebar
 from preview import PreviewPane
@@ -76,6 +76,7 @@ class EC2FileManager(QMainWindow):
         super().__init__()
         self.ssh           = None
         self.sftp          = None
+        self._health_worker = None
         self.current_path  = "/"
         self.history       = []
         self.future        = []
@@ -734,6 +735,51 @@ class EC2FileManager(QMainWindow):
         self.status.showMessage("Connected successfully")
         self._finish_connect_ui()
 
+        # Start the background heartbeat so the app can warn about — and
+        # ideally recover the UI cleanly from — a dying connection instead
+        # of only discovering it when some unrelated action fails midway.
+        self._health_worker = ConnectionHealthWorker(self.ssh)
+        self._health_worker.at_risk.connect(self._on_connection_at_risk)
+        self._health_worker.recovered.connect(self._on_connection_recovered)
+        self._health_worker.lost.connect(self._on_connection_lost)
+        self._health_worker.start()
+
+    def _on_connection_at_risk(self, detail):
+        # A single missed heartbeat — could be a transient network blip, so
+        # this is deliberately a non-blocking heads-up (status bar + the
+        # connection indicator turning amber), not a modal dialog. Give the
+        # user a chance to finish and save whatever they're doing.
+        if not self.ssh:
+            return
+        self.conn_lbl.setText("🟡  {}  (unstable)".format(self.host_label))
+        self.conn_lbl.setStyleSheet("color: {};".format(T['WARNING']))
+        self.status.showMessage(
+            "⚠ Connection to {} looks unstable — it may drop soon.".format(self.host_label),
+            8000,
+        )
+
+    def _on_connection_recovered(self):
+        if not self.ssh:
+            return
+        self.conn_lbl.setText("🟢  {}".format(self.host_label))
+        self.conn_lbl.setStyleSheet("color: {};".format(T['SUCCESS']))
+        self.status.showMessage("Connection to {} recovered.".format(self.host_label), 5000)
+
+    def _on_connection_lost(self, detail):
+        # The heartbeat confirmed the transport is actually dead. This can
+        # still fire once, harmlessly, right after a deliberate manual
+        # disconnect (a check already in flight when the socket closes) —
+        # self.ssh is cleared first in _disconnect(), so that race is a
+        # no-op here.
+        if not self.ssh:
+            return
+        host_label = self.host_label
+        self._disconnect(reason="Connection lost")
+        QMessageBox.warning(
+            self, "Connection Lost",
+            "The SSH connection to {} was lost:\n\n{}".format(host_label, detail)
+        )
+
     def _on_connect_error(self, message):
         QMessageBox.critical(self, "Connection Failed", message)
         self.status.showMessage("Connection failed")
@@ -746,7 +792,14 @@ class EC2FileManager(QMainWindow):
             self._connecting_dlg = None
         self.progress.hide()
 
-    def _disconnect(self):
+    def _disconnect(self, reason="Disconnected"):
+        # Stop the heartbeat first — and clear self.ssh right after closing
+        # — so a health check already in flight can't deliver a stray
+        # "lost" signal for a connection we're closing on purpose (see the
+        # guard in _on_connection_lost).
+        if self._health_worker:
+            self._health_worker.stop()
+            self._health_worker = None
         try:
             if self.sftp: self.sftp.close()
             if self.ssh:  self.ssh.close()
@@ -769,7 +822,7 @@ class EC2FileManager(QMainWindow):
         self.addr_bar.clear()
         self.terminal.write_output("[disconnected]")
         self.terminal.show_prompt("(not connected)$ ")
-        self.status.showMessage("Disconnected")
+        self.status.showMessage(reason)
 
     # ── Navigation ────────────────────────────────────────────
     def _nav_to(self, path):

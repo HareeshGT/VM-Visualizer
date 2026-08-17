@@ -17,9 +17,11 @@ import sys
 
 from PyQt5.QtWidgets import QApplication, QStyleFactory
 from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtCore import QPropertyAnimation, QEasingCurve
 
 from themes import T, CURRENT_THEME, build_qss, apply_theme_vars
 from main_window import EC2FileManager
+from splash import SplashScreen
 
 
 def _build_palette() -> QPalette:
@@ -63,9 +65,49 @@ def main() -> int:
     app.setStyleSheet(build_qss())
     app.setPalette(_build_palette())
 
-    # ── Main window ───────────────────────────────────────────
-    window = EC2FileManager()
-    window.show()
+    # ── Opening animation, then main window ────────────────────
+    # The main window is only constructed once the splash's ring/glyph/
+    # text sequence finishes, so the animation isn't competing with
+    # EC2FileManager's own startup work (theme/QSS already applied above,
+    # window construction, sidebar layout, etc.) for the UI thread.
+    splash = SplashScreen()
+    window_ref = {}
+
+    def _begin_zoom():
+        window = EC2FileManager()
+        window_ref["window"] = window
+
+        # EC2FileManager only calls self.resize(...) in __init__, never
+        # move(...), so centre it ourselves so it doesn't land at (0, 0).
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            w, h  = window.width(), window.height()
+            window.move(avail.x() + (avail.width() - w) // 2,
+                        avail.y() + (avail.height() - h) // 2)
+
+        window.setWindowOpacity(0.0)
+        window.show()
+
+        fade_in = QPropertyAnimation(window, b"windowOpacity", window)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setDuration(SplashScreen.ZOOM_MS)
+        fade_in.setEasingCurve(QEasingCurve.InOutCubic)
+
+        # Splash fades out in place while the real window fades in at the
+        # same time, in the same animation group — a plain crossfade.
+        splash.zoom_into(None, on_done=_finish, companions=[fade_in])
+
+    def _finish():
+        window_ref["window"].setWindowOpacity(1.0)
+        window_ref["window"].raise_()
+        window_ref["window"].activateWindow()
+        splash.close()
+
+    splash.finished.connect(_begin_zoom)
+    splash.show()
+    splash.start()
 
     return app.exec_()
 
