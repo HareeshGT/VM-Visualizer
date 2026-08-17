@@ -561,6 +561,216 @@ class ConfigCardWidget(_CardBase):
                                "WARNING" if is_secret else "INFO"))
 
 
+def _pvc_status_color_key(status: str) -> str:
+    s = (status or "").lower()
+    if s == "bound":
+        return "SUCCESS"
+    if s == "pending":
+        return "WARNING"
+    if s in ("lost", "failed"):
+        return "DANGER"
+    return "TEXT_MUTED"
+
+
+class PVCCardWidget(_CardBase):
+    """One PersistentVolumeClaim, as a card. `meta` matches what
+    _populate_pvcs builds: namespace, name, status, volume, capacity,
+    access_modes, storage_class, age."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        status = meta.get("status", "") or "Unknown"
+        super().__init__(T.get(_pvc_status_color_key(status), T["TEXT_MUTED"]), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        top.addWidget(_pill(status, _pvc_status_color_key(status)))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        bottom.addWidget(_meta_label(f"Capacity {meta.get('capacity', '-') or '-'}"))
+        bottom.addWidget(_meta_label(meta.get("access_modes", "-") or "-"))
+        bottom.addWidget(_chip(meta.get("storage_class", "-") or "-"))
+
+        vol_lbl = _meta_label(meta.get("volume", "-") or "-")
+        vol_lbl.setToolTip(meta.get("volume", ""))
+        vol_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(vol_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
+def _pv_status_color_key(status: str) -> str:
+    s = (status or "").lower()
+    if s == "bound":
+        return "SUCCESS"
+    if s == "available":
+        return "INFO"
+    if s == "released":
+        return "WARNING"
+    if s == "failed":
+        return "DANGER"
+    return "TEXT_MUTED"
+
+
+class PVCardWidget(_CardBase):
+    """One PersistentVolume, as a card. PVs are cluster-scoped (no
+    namespace). `meta` matches what _populate_pvs builds: name, capacity,
+    access_modes, reclaim_policy, status, claim, storage_class, age."""
+
+    def __init__(self, meta: dict, parent=None):
+        status = meta.get("status", "") or "Unknown"
+        super().__init__(T.get(_pv_status_color_key(status), T["TEXT_MUTED"]), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        top.addWidget(_pill(status, _pv_status_color_key(status)))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        bottom.addWidget(_meta_label(f"Capacity {meta.get('capacity', '-') or '-'}"))
+        bottom.addWidget(_meta_label(meta.get("access_modes", "-") or "-"))
+        bottom.addWidget(_chip(meta.get("reclaim_policy", "-") or "-"))
+        bottom.addWidget(_chip(meta.get("storage_class", "-") or "-"))
+
+        claim_lbl = _meta_label(meta.get("claim", "-") or "-")
+        claim_lbl.setToolTip(meta.get("claim", ""))
+        claim_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(claim_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
+def _job_status_color_key(status: str) -> str:
+    s = (status or "").lower()
+    if s == "complete":
+        return "SUCCESS"
+    if s == "failed":
+        return "DANGER"
+    if s == "running":
+        return "INFO"
+    return "TEXT_MUTED"
+
+
+class JobCardWidget(_CardBase):
+    """One Job, as a card. `meta` matches what _populate_jobs builds:
+    namespace, name, status, completions, duration, age."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        status = meta.get("status", "") or "Unknown"
+        super().__init__(T.get(_job_status_color_key(status), T["TEXT_MUTED"]), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        top.addWidget(_pill(status, _job_status_color_key(status)))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        bottom.addWidget(_meta_label(f"Completions {meta.get('completions', '-') or '-'}"))
+        bottom.addWidget(_meta_label(f"Duration {meta.get('duration', '-') or '-'}"))
+
+        owner = meta.get("owner", "") or ""
+        owner_lbl = _meta_label(f"← {owner}" if owner else "")
+        owner_lbl.setToolTip(owner)
+        owner_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bottom.addWidget(owner_lbl, 1)
+
+        outer.addLayout(bottom)
+
+
+class CronJobCardWidget(_CardBase):
+    """One CronJob, as a card. `meta` matches what _populate_cronjobs
+    builds: namespace, name, schedule, suspend (bool), active (int),
+    last_schedule, age."""
+
+    def __init__(self, meta: dict, show_namespace: bool, parent=None):
+        suspended = bool(meta.get("suspend"))
+        active    = meta.get("active", 0) or 0
+        if suspended:
+            accent_key = "TEXT_MUTED"
+        elif active:
+            accent_key = "INFO"
+        else:
+            accent_key = "SUCCESS"
+        super().__init__(T.get(accent_key, T["TEXT_MUTED"]), parent)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 8)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_lbl = QLabel(meta.get("name", ""))
+        name_lbl.setFont(monospace_font(13, bold=True))
+        name_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']};")
+        name_lbl.setToolTip(meta.get("name", ""))
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(name_lbl, 1)
+
+        if suspended:
+            top.addWidget(_pill("Suspended", "TEXT_MUTED"))
+        elif active:
+            top.addWidget(_pill(f"{active} running", "INFO"))
+        else:
+            top.addWidget(_pill("Scheduled", "SUCCESS"))
+        top.addWidget(_meta_label(f"⏱ {meta.get('age', '-')}"))
+        outer.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        if show_namespace:
+            bottom.addWidget(_chip(meta.get("namespace", "")))
+
+        bottom.addWidget(_chip(meta.get("schedule", "-") or "-"))
+        bottom.addWidget(_meta_label(f"Last run {meta.get('last_schedule', '-') or '-'}"))
+
+        outer.addLayout(bottom)
+
+
 # ── Shared helpers ──────────────────────────────────────────────
 def _ratio_ok(ready: str) -> bool:
     try:

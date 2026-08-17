@@ -26,7 +26,8 @@ from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
     StatefulSetCardWidget, DaemonSetCardWidget, EventCardWidget,
-    HPACardWidget,
+    HPACardWidget, PVCCardWidget, PVCardWidget, JobCardWidget,
+    CronJobCardWidget,
 )
 from utils import (
     append_terminal_html, append_terminal_text,
@@ -55,6 +56,7 @@ class KubernetesTab(QWidget):
         self.ssh          = None
         self._current_ns  = "default"
         self._namespaces  = []
+        self._namespaces_pending_select = None
         self._workers     = []
         self._events_raw  = ""
         self._events_warnings_only = False
@@ -156,6 +158,15 @@ class KubernetesTab(QWidget):
         ns_row.addWidget(self.ns_combo)
         self._style_ns_group()
         cb.addWidget(self.ns_group)
+
+        # Namespace create — small icon button living right next to the
+        # picker rather than buried in a menu, since switching is already
+        # the picker's job.
+        self.ns_new_btn = self._toolbar_btn("＋", tooltip="Create namespace…")
+        self.ns_new_btn.setFixedWidth(34)
+        self.ns_new_btn.clicked.connect(self._create_namespace)
+        cb.addWidget(self.ns_new_btn)
+
         cb.addWidget(self._vline())
 
         self.refresh_btn = self._toolbar_btn("↺  Refresh")
@@ -202,6 +213,8 @@ class KubernetesTab(QWidget):
         self._build_hpa_tab()
         self._build_services_tab()
         self._build_ingress_tab()
+        self._build_jobs_tab()
+        self._build_storage_tab()
         self._build_config_tab()
         self._build_events_tab()
         self._build_tunnels_tab()
@@ -663,6 +676,672 @@ class KubernetesTab(QWidget):
         lay.addWidget(self.ing_list)
         self.sub_tabs.addTab(w, "🌐  Ingress")
 
+    # ── Jobs & CronJobs ───────────────────────────────────────
+    def _build_jobs_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(1)
+
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(0)
+
+        self.wl_type_bar = QWidget()
+        self.wl_type_bar.setFixedHeight(58)
+        self.wl_type_bar.setStyleSheet(
+            f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
+        )
+        tb_lay = QHBoxLayout(self.wl_type_bar)
+        tb_lay.setContentsMargins(12, 10, 12, 10)
+        tb_lay.setSpacing(10)
+
+        self.wl_type_toggle = QWidget()
+        self.wl_type_toggle.setObjectName("wl_type_toggle")
+        self.wl_type_toggle.setFixedHeight(36)
+        toggle_lay = QHBoxLayout(self.wl_type_toggle)
+        toggle_lay.setContentsMargins(3, 3, 3, 3)
+        toggle_lay.setSpacing(2)
+        self.wl_type_jobs_btn = QPushButton("⚙  Jobs")
+        self.wl_type_cron_btn = QPushButton("⏰  CronJobs")
+        for btn in (self.wl_type_jobs_btn, self.wl_type_cron_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(30)
+            toggle_lay.addWidget(btn)
+        self.wl_type_jobs_btn.setChecked(True)
+        self.wl_type_jobs_btn.clicked.connect(lambda: self._set_workload_type("Jobs"))
+        self.wl_type_cron_btn.clicked.connect(lambda: self._set_workload_type("CronJobs"))
+        self._workload_type = "Jobs"
+        self._style_toggle(self.wl_type_toggle, (self.wl_type_jobs_btn, self.wl_type_cron_btn))
+        tb_lay.addWidget(self.wl_type_toggle)
+
+        self.wl_filter = QLineEdit()
+        self.wl_filter.setPlaceholderText("🔍  Filter…")
+        self.wl_filter.textChanged.connect(self._filter_workloads)
+        tb_lay.addWidget(self.wl_filter, 1)
+
+        self.wl_count_lbl = QLabel("")
+        tb_lay.addWidget(self.wl_count_lbl)
+        ll.addWidget(self.wl_type_bar)
+
+        wl_actions = QHBoxLayout()
+        wl_actions.setContentsMargins(10, 6, 10, 6)
+        wl_actions.setSpacing(8)
+
+        self.wl_trigger_btn = self._toolbar_btn("▶  Trigger Now", object_name="primary",
+                                                  tooltip="Manually run this CronJob now")
+        self.wl_trigger_btn.clicked.connect(self._workload_trigger_now)
+        wl_actions.addWidget(self.wl_trigger_btn)
+
+        self.wl_suspend_btn = self._toolbar_btn("⏸  Suspend",
+                                                  tooltip="Toggle Suspend/Resume for this CronJob")
+        self.wl_suspend_btn.clicked.connect(self._workload_toggle_suspend)
+        wl_actions.addWidget(self.wl_suspend_btn)
+
+        wl_actions.addStretch()
+
+        self.wl_desc_btn = self._toolbar_btn("📋  Describe")
+        self.wl_desc_btn.clicked.connect(self._workload_describe)
+        wl_actions.addWidget(self.wl_desc_btn)
+
+        self.wl_del_btn = self._toolbar_btn("🗑  Delete", object_name="danger")
+        self.wl_del_btn.clicked.connect(self._workload_delete)
+        wl_actions.addWidget(self.wl_del_btn)
+
+        wl_actions_widget = QWidget()
+        wl_actions_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        wl_actions_widget.setLayout(wl_actions)
+        ll.addWidget(wl_actions_widget)
+        self.wl_toolbar = wl_actions_widget
+
+        self.wl_list = QListWidget()
+        self.wl_list.setSpacing(6)
+        self.wl_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.wl_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.wl_list.customContextMenuRequested.connect(self._workload_ctx_menu)
+        self.wl_list.itemDoubleClicked.connect(self._on_workload_double_click)
+        self.wl_list.currentItemChanged.connect(self._on_workload_selection_changed)
+        self.wl_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        ll.addWidget(self.wl_list)
+        splitter.addWidget(left)
+
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+
+        self.wl_history_hdr = QLabel("  Run History")
+        self.wl_history_hdr.setFixedHeight(34)
+        self.wl_history_hdr.setStyleSheet(
+            f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
+            f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
+        )
+        rl.addWidget(self.wl_history_hdr)
+
+        self.wl_history_hint = QLabel("  Select a CronJob to see its recent Job runs.")
+        self.wl_history_hint.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px; padding: 12px;")
+        self.wl_history_hint.setWordWrap(True)
+        rl.addWidget(self.wl_history_hint)
+
+        self.wl_history_list = QListWidget()
+        self.wl_history_list.setSpacing(6)
+        self.wl_history_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.wl_history_list.itemDoubleClicked.connect(self._on_wl_history_double_click)
+        self.wl_history_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        rl.addWidget(self.wl_history_list)
+
+        splitter.addWidget(right)
+        splitter.setSizes([440, 480])
+        lay.addWidget(splitter)
+        self.sub_tabs.addTab(w, "⚙️  Jobs & CronJobs")
+        self._update_workload_action_visibility()
+
+    def _style_toggle(self, widget, buttons):
+        """Generic segmented-toggle styling shared by every ConfigMaps/
+        Secrets-style two-way switch on this tab (Config's own toggle
+        keeps its dedicated _style_cfg_toggle since it existed first —
+        this is for the newer Storage/Jobs toggles so their CSS doesn't
+        have to be copy-pasted per tab). Re-called from apply_theme()."""
+        widget.setStyleSheet(
+            f"QWidget#{widget.objectName()} {{ background: {T['BG_ITEM']}; "
+            f"border: 1px solid {T['BORDER']}; border-radius: 18px; }}"
+        )
+        btn_css = f"""
+            QPushButton {{
+                background: transparent; color: {T['TEXT_DIM']};
+                border: none; border-radius: 15px; padding: 0 16px;
+                font-size: 12px; font-weight: 700;
+            }}
+            QPushButton:hover:!checked {{ background: {T['BG_HOVER']}; color: {T['TEXT_PRIMARY']}; }}
+            QPushButton:checked {{ background: {T['ACCENT']}; color: white; }}
+        """
+        for b in buttons:
+            b.setStyleSheet(btn_css)
+
+    def _update_workload_action_visibility(self):
+        """Trigger Now / Suspend only make sense for CronJobs — Jobs are
+        one-shot and have no schedule to suspend."""
+        is_cron = (self._workload_type == "CronJobs")
+        self.wl_trigger_btn.setVisible(is_cron)
+        self.wl_suspend_btn.setVisible(is_cron)
+        self.wl_history_hdr.setVisible(is_cron)
+        self.wl_history_hint.setVisible(is_cron)
+        self.wl_history_list.setVisible(is_cron)
+        if not is_cron:
+            self.wl_history_list.clear()
+
+    def _set_workload_type(self, name: str):
+        self._workload_type = name
+        self.wl_type_jobs_btn.setChecked(name == "Jobs")
+        self.wl_type_cron_btn.setChecked(name == "CronJobs")
+        self._update_workload_action_visibility()
+        self._load_workloads()
+
+    def _load_workloads(self, _=None):
+        if self._workload_type == "CronJobs":
+            self._load_cronjobs()
+        else:
+            self._load_jobs()
+
+    @staticmethod
+    def _job_status(status: dict, spec: dict) -> str:
+        conditions = status.get("conditions") or []
+        for c in conditions:
+            if c.get("type") == "Complete" and c.get("status") == "True":
+                return "Complete"
+            if c.get("type") == "Failed" and c.get("status") == "True":
+                return "Failed"
+        if status.get("active"):
+            return "Running"
+        if status.get("succeeded"):
+            return "Complete"
+        if status.get("failed"):
+            return "Failed"
+        return "Pending"
+
+    @staticmethod
+    def _job_duration(status: dict) -> str:
+        start = status.get("startTime")
+        end   = status.get("completionTime")
+        if not start:
+            return "-"
+        try:
+            t0 = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return "-"
+        t1 = datetime.now(timezone.utc)
+        if end:
+            try:
+                t1 = datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+        secs = max(0, int((t1 - t0).total_seconds()))
+        if secs < 60:
+            return f"{secs}s"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m{secs % 60}s"
+        hours = mins // 60
+        return f"{hours}h{mins % 60}m"
+
+    def _load_jobs(self):
+        self._run_cmd(f"kubectl get jobs {self._ns_flag()} -o json 2>&1", self._populate_jobs)
+
+    def _job_meta_from_item(self, it: dict) -> dict:
+        meta_o = it.get("metadata") or {}
+        spec   = it.get("spec") or {}
+        status = it.get("status") or {}
+        completions = spec.get("completions", 1)
+        succeeded   = status.get("succeeded", 0)
+        owner = ""
+        for ref in meta_o.get("ownerReferences") or []:
+            if ref.get("kind") == "CronJob":
+                owner = ref.get("name", "")
+                break
+        return {
+            "namespace":   meta_o.get("namespace", ""),
+            "name":        meta_o.get("name", ""),
+            "status":      self._job_status(status, spec),
+            "completions": f"{succeeded}/{completions}",
+            "duration":    self._job_duration(status),
+            "owner":       owner,
+            "age":         self._humanize_age(meta_o.get("creationTimestamp", "")),
+        }
+
+    def _populate_jobs(self, out: str):
+        self.wl_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+        for it in items:
+            meta = self._job_meta_from_item(it)
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, {**meta, "kind": "job"})
+            item.setSizeHint(QSize(0, JobCardWidget.CARD_HEIGHT))
+            self.wl_list.addItem(item)
+            self.wl_list.setItemWidget(item, JobCardWidget(meta, all_ns))
+        total = len(items)
+        color_key = "TEXT_MUTED" if total == 0 else "INFO"
+        self._set_count_badge(self.wl_count_lbl, f"{total} job{'s' if total != 1 else ''}", color_key)
+        self._filter_workloads(self.wl_filter.text())
+
+    def _load_cronjobs(self):
+        self._run_cmd(f"kubectl get cronjobs {self._ns_flag()} -o json 2>&1", self._populate_cronjobs)
+
+    def _populate_cronjobs(self, out: str):
+        self.wl_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+        for it in items:
+            meta_o = it.get("metadata") or {}
+            spec   = it.get("spec") or {}
+            status = it.get("status") or {}
+            meta = {
+                "namespace":     meta_o.get("namespace", ""),
+                "name":          meta_o.get("name", ""),
+                "schedule":      spec.get("schedule", "-"),
+                "suspend":       bool(spec.get("suspend", False)),
+                "active":        len(status.get("active") or []),
+                "last_schedule": self._humanize_age(status.get("lastScheduleTime", "")) if status.get("lastScheduleTime") else "never",
+                "age":           self._humanize_age(meta_o.get("creationTimestamp", "")),
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, {**meta, "kind": "cronjob"})
+            item.setSizeHint(QSize(0, CronJobCardWidget.CARD_HEIGHT))
+            self.wl_list.addItem(item)
+            self.wl_list.setItemWidget(item, CronJobCardWidget(meta, all_ns))
+        total = len(items)
+        color_key = "TEXT_MUTED" if total == 0 else "INFO"
+        self._set_count_badge(self.wl_count_lbl, f"{total} cronjob{'s' if total != 1 else ''}", color_key)
+        self._filter_workloads(self.wl_filter.text())
+
+    def _filter_workloads(self, text: str):
+        q = text.lower()
+        for i in range(self.wl_list.count()):
+            item = self.wl_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
+
+    def _selected_workload(self) -> tuple:  # (Optional[dict])
+        item = self.wl_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select a job or cronjob first.")
+            return None
+        return item.data(Qt.UserRole) or {}
+
+    def _on_workload_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        self._describe(meta.get("kind", "job"), meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_workload_selection_changed(self, current, previous):
+        if previous is not None:
+            w = self.wl_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is None:
+            self.wl_history_list.clear()
+            return
+        w = self.wl_list.itemWidget(current)
+        if w:
+            w.set_selected(True)
+        meta = current.data(Qt.UserRole) or {}
+        if meta.get("kind") == "cronjob":
+            self._load_job_history(meta.get("namespace") or "default", meta.get("name"))
+        else:
+            self.wl_history_list.clear()
+
+    def _load_job_history(self, ns: str, cronjob_name: str):
+        self._history_cronjob = cronjob_name
+        self._run_cmd(f"kubectl get jobs -n {ns} -o json 2>&1",
+                      lambda o: self._populate_job_history(o, cronjob_name))
+
+    def _populate_job_history(self, out: str, cronjob_name: str):
+        # The selection may have moved on to a different CronJob (or off
+        # CronJobs entirely) while this command was in flight — drop a
+        # stale result rather than showing the wrong run history.
+        if getattr(self, "_history_cronjob", None) != cronjob_name:
+            return
+        self.wl_history_list.clear()
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+        runs = []
+        for it in items:
+            owners = (it.get("metadata") or {}).get("ownerReferences") or []
+            if any(r.get("kind") == "CronJob" and r.get("name") == cronjob_name for r in owners):
+                runs.append(it)
+        # Most recent run first.
+        runs.sort(key=lambda it: (it.get("metadata") or {}).get("creationTimestamp", ""), reverse=True)
+        for it in runs:
+            meta = self._job_meta_from_item(it)
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, {**meta, "kind": "job"})
+            item.setSizeHint(QSize(0, JobCardWidget.CARD_HEIGHT))
+            self.wl_history_list.addItem(item)
+            self.wl_history_list.setItemWidget(item, JobCardWidget(meta, False))
+        if not runs:
+            self.wl_history_list.addItem(QListWidgetItem("  No runs yet."))
+
+    def _on_wl_history_double_click(self, item):
+        meta = item.data(Qt.UserRole)
+        if not meta:
+            return
+        self._describe("job", meta.get("name"), meta.get("namespace") or "default")
+
+    def _workload_describe(self):
+        meta = self._selected_workload()
+        if meta:
+            self._describe(meta.get("kind", "job"), meta.get("name"), meta.get("namespace") or "default")
+
+    def _workload_delete(self):
+        meta = self._selected_workload()
+        if not meta:
+            return
+        kind = meta.get("kind", "job")
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        label = "CronJob" if kind == "cronjob" else "Job"
+        if QMessageBox.question(self, f"Delete {label}", f'Delete {label.lower()} "{name}"?',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._run_cmd(f"kubectl delete {kind} {name} -n {ns} 2>&1",
+                          lambda o: (self._log(o), self._load_workloads()))
+
+    def _workload_trigger_now(self):
+        meta = self._selected_workload()
+        if not meta:
+            return
+        if meta.get("kind") != "cronjob":
+            QMessageBox.information(self, "Trigger Now", "Select a CronJob to trigger.")
+            return
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        job_name = f"{name}-manual-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        def on_done(out):
+            self._log(out)
+            self._load_job_history(ns, name)
+            self._load_cronjobs()
+
+        self._run_cmd(
+            f"kubectl create job {job_name} --from=cronjob/{name} -n {ns} 2>&1", on_done)
+
+    def _workload_toggle_suspend(self):
+        meta = self._selected_workload()
+        if not meta:
+            return
+        if meta.get("kind") != "cronjob":
+            QMessageBox.information(self, "Suspend / Resume", "Select a CronJob first.")
+            return
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        new_suspend = not meta.get("suspend")
+        patch = '{"spec":{"suspend":%s}}' % ("true" if new_suspend else "false")
+        self._run_cmd(
+            f"kubectl patch cronjob {name} -n {ns} -p '{patch}' --type=merge 2>&1",
+            lambda o: (self._log(o), self._load_cronjobs()))
+
+    def _workload_ctx_menu(self, pos):
+        item = self.wl_list.itemAt(pos)
+        if not item:
+            return
+        self.wl_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        kind = meta.get("kind", "job")
+        menu = QMenu(self)
+        menu.addAction("📄  Describe", self._workload_describe)
+        if kind == "cronjob":
+            menu.addAction("▶  Trigger Now", self._workload_trigger_now)
+            suspend_label = "▶  Resume" if meta.get("suspend") else "⏸  Suspend"
+            menu.addAction(suspend_label, self._workload_toggle_suspend)
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._workload_delete)
+        menu.exec_(self.wl_list.viewport().mapToGlobal(pos))
+
+    # ── Storage: PersistentVolumeClaims / PersistentVolumes ────
+    def _build_storage_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.pvx_type_bar = QWidget()
+        self.pvx_type_bar.setFixedHeight(58)
+        self.pvx_type_bar.setStyleSheet(
+            f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};"
+        )
+        tb_lay = QHBoxLayout(self.pvx_type_bar)
+        tb_lay.setContentsMargins(12, 10, 12, 10)
+        tb_lay.setSpacing(10)
+
+        self.pvx_type_toggle = QWidget()
+        self.pvx_type_toggle.setObjectName("pvx_type_toggle")
+        self.pvx_type_toggle.setFixedHeight(36)
+        toggle_lay = QHBoxLayout(self.pvx_type_toggle)
+        toggle_lay.setContentsMargins(3, 3, 3, 3)
+        toggle_lay.setSpacing(2)
+        self.pvx_type_pvc_btn = QPushButton("📄  Claims (PVC)")
+        self.pvx_type_pv_btn  = QPushButton("💽  Volumes (PV)")
+        for btn in (self.pvx_type_pvc_btn, self.pvx_type_pv_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(30)
+            toggle_lay.addWidget(btn)
+        self.pvx_type_pvc_btn.setChecked(True)
+        self.pvx_type_pvc_btn.clicked.connect(lambda: self._set_storage_type("PVC"))
+        self.pvx_type_pv_btn.clicked.connect(lambda: self._set_storage_type("PV"))
+        self._storage_type = "PVC"
+        self._style_toggle(self.pvx_type_toggle, (self.pvx_type_pvc_btn, self.pvx_type_pv_btn))
+        tb_lay.addWidget(self.pvx_type_toggle)
+
+        self.pvx_filter = QLineEdit()
+        self.pvx_filter.setPlaceholderText("🔍  Filter…")
+        self.pvx_filter.textChanged.connect(self._filter_storage)
+        tb_lay.addWidget(self.pvx_filter, 1)
+
+        self.pvx_count_lbl = QLabel("")
+        tb_lay.addWidget(self.pvx_count_lbl)
+        lay.addWidget(self.pvx_type_bar)
+
+        pvx_actions = QHBoxLayout()
+        pvx_actions.setContentsMargins(10, 6, 10, 6)
+        pvx_actions.setSpacing(8)
+        pvx_actions.addStretch()
+
+        self.pvx_desc_btn = self._toolbar_btn("📋  Describe")
+        self.pvx_desc_btn.clicked.connect(self._storage_describe)
+        pvx_actions.addWidget(self.pvx_desc_btn)
+
+        self.pvx_del_btn = self._toolbar_btn("🗑  Delete", object_name="danger")
+        self.pvx_del_btn.clicked.connect(self._storage_delete)
+        pvx_actions.addWidget(self.pvx_del_btn)
+
+        pvx_actions_widget = QWidget()
+        pvx_actions_widget.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
+        pvx_actions_widget.setLayout(pvx_actions)
+        lay.addWidget(pvx_actions_widget)
+        self.pvx_toolbar = pvx_actions_widget
+
+        self.pvx_list = QListWidget()
+        self.pvx_list.setSpacing(6)
+        self.pvx_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.pvx_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.pvx_list.customContextMenuRequested.connect(self._storage_ctx_menu)
+        self.pvx_list.itemDoubleClicked.connect(self._on_storage_double_click)
+        self.pvx_list.currentItemChanged.connect(self._on_storage_selection_changed)
+        self.pvx_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; padding: 8px; }"
+            "QListWidget::item { border: none; padding: 0; margin: 0; }"
+        )
+        lay.addWidget(self.pvx_list)
+        self.sub_tabs.addTab(w, "💾  Storage")
+
+    def _set_storage_type(self, name: str):
+        self._storage_type = name
+        self.pvx_type_pvc_btn.setChecked(name == "PVC")
+        self.pvx_type_pv_btn.setChecked(name == "PV")
+        self._load_storage()
+
+    def _load_storage(self, _=None):
+        if self._storage_type == "PV":
+            self._load_pvs()
+        else:
+            self._load_pvcs()
+
+    def _load_pvcs(self):
+        self._run_cmd(f"kubectl get pvc {self._ns_flag()} -o json 2>&1", self._populate_pvcs)
+
+    def _populate_pvcs(self, out: str):
+        self.pvx_list.clear()
+        all_ns = (self._current_ns == "(all namespaces)")
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+        for it in items:
+            meta_o = it.get("metadata") or {}
+            spec   = it.get("spec") or {}
+            status = it.get("status") or {}
+            capacity = (status.get("capacity") or {}).get("storage", "-")
+            meta = {
+                "namespace":     meta_o.get("namespace", ""),
+                "name":          meta_o.get("name", ""),
+                "status":        status.get("phase", "Unknown"),
+                "volume":        spec.get("volumeName", "-") or "-",
+                "capacity":      capacity,
+                "access_modes":  ", ".join(spec.get("accessModes") or []) or "-",
+                "storage_class": spec.get("storageClassName", "-") or "-",
+                "age":           self._humanize_age(meta_o.get("creationTimestamp", "")),
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, {**meta, "kind": "pvc"})
+            item.setSizeHint(QSize(0, PVCCardWidget.CARD_HEIGHT))
+            self.pvx_list.addItem(item)
+            self.pvx_list.setItemWidget(item, PVCCardWidget(meta, all_ns))
+        total = len(items)
+        color_key = "TEXT_MUTED" if total == 0 else "INFO"
+        self._set_count_badge(self.pvx_count_lbl, f"{total} claim{'s' if total != 1 else ''}", color_key)
+        self._filter_storage(self.pvx_filter.text())
+
+    def _load_pvs(self):
+        # PersistentVolumes are cluster-scoped — no namespace flag applies.
+        self._run_cmd("kubectl get pv -o json 2>&1", self._populate_pvs)
+
+    def _populate_pvs(self, out: str):
+        self.pvx_list.clear()
+        try:
+            items = json.loads(out).get("items", [])
+        except Exception:
+            items = []
+        for it in items:
+            meta_o = it.get("metadata") or {}
+            spec   = it.get("spec") or {}
+            status = it.get("status") or {}
+            claim_ref = spec.get("claimRef") or {}
+            claim = (f"{claim_ref.get('namespace', '')}/{claim_ref.get('name', '')}"
+                     if claim_ref.get("name") else "-")
+            meta = {
+                "name":           meta_o.get("name", ""),
+                "capacity":       (spec.get("capacity") or {}).get("storage", "-"),
+                "access_modes":   ", ".join(spec.get("accessModes") or []) or "-",
+                "reclaim_policy": spec.get("persistentVolumeReclaimPolicy", "-") or "-",
+                "status":         status.get("phase", "Unknown"),
+                "claim":          claim,
+                "storage_class":  spec.get("storageClassName", "-") or "-",
+                "age":            self._humanize_age(meta_o.get("creationTimestamp", "")),
+            }
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, {**meta, "kind": "pv"})
+            item.setSizeHint(QSize(0, PVCardWidget.CARD_HEIGHT))
+            self.pvx_list.addItem(item)
+            self.pvx_list.setItemWidget(item, PVCardWidget(meta))
+        total = len(items)
+        color_key = "TEXT_MUTED" if total == 0 else "INFO"
+        self._set_count_badge(self.pvx_count_lbl, f"{total} volume{'s' if total != 1 else ''}", color_key)
+        self._filter_storage(self.pvx_filter.text())
+
+    def _filter_storage(self, text: str):
+        q = text.lower()
+        for i in range(self.pvx_list.count()):
+            item = self.pvx_list.item(i)
+            meta = item.data(Qt.UserRole) or {}
+            item.setHidden(q not in meta.get("name", "").lower())
+
+    def _selected_storage(self):
+        item = self.pvx_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No selection", "Select a claim or volume first.")
+            return None
+        return item.data(Qt.UserRole) or {}
+
+    def _on_storage_double_click(self, item):
+        meta = item.data(Qt.UserRole) or {}
+        kind = "pvc" if meta.get("kind") == "pvc" else "pv"
+        self._describe(kind, meta.get("name"), meta.get("namespace") or "default")
+
+    def _on_storage_selection_changed(self, current, previous):
+        if previous is not None:
+            w = self.pvx_list.itemWidget(previous)
+            if w:
+                w.set_selected(False)
+        if current is not None:
+            w = self.pvx_list.itemWidget(current)
+            if w:
+                w.set_selected(True)
+
+    def _storage_describe(self):
+        meta = self._selected_storage()
+        if meta:
+            kind = "pvc" if meta.get("kind") == "pvc" else "pv"
+            self._describe(kind, meta.get("name"), meta.get("namespace") or "default")
+
+    def _storage_delete(self):
+        meta = self._selected_storage()
+        if not meta:
+            return
+        is_pvc = meta.get("kind") == "pvc"
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        label = "PersistentVolumeClaim" if is_pvc else "PersistentVolume"
+        if QMessageBox.question(self, f"Delete {label}", f'Delete {label} "{name}"?',
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            if is_pvc:
+                cmd = f"kubectl delete pvc {name} -n {ns} 2>&1"
+            else:
+                cmd = f"kubectl delete pv {name} 2>&1"
+            self._run_cmd(cmd, lambda o: (self._log(o), self._load_storage()))
+
+    def _storage_ctx_menu(self, pos):
+        item = self.pvx_list.itemAt(pos)
+        if not item:
+            return
+        self.pvx_list.setCurrentItem(item)
+        meta = item.data(Qt.UserRole) or {}
+        kind = "pvc" if meta.get("kind") == "pvc" else "pv"
+        name = meta.get("name")
+        ns   = meta.get("namespace") or "default"
+        menu = QMenu(self)
+        menu.addAction("📄  Describe", lambda: self._describe(kind, name, ns))
+        menu.addSeparator()
+        menu.addAction("🗑  Delete", self._storage_delete)
+        menu.exec_(self.pvx_list.viewport().mapToGlobal(pos))
+
     def _build_config_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -1057,9 +1736,22 @@ class KubernetesTab(QWidget):
                     getattr(self, "sts_toolbar", None), getattr(self, "ds_toolbar", None),
                     getattr(self, "hpa_toolbar", None),
                     getattr(self, "svc_toolbar", None), getattr(self, "ing_toolbar", None),
-                    getattr(self, "events_toolbar", None), getattr(self, "tunnel_toolbar", None)):
+                    getattr(self, "events_toolbar", None), getattr(self, "tunnel_toolbar", None),
+                    getattr(self, "wl_toolbar", None), getattr(self, "wl_type_bar", None),
+                    getattr(self, "pvx_toolbar", None), getattr(self, "pvx_type_bar", None)):
             if bar is not None:
                 bar.setStyleSheet(toolbar_style)
+        if getattr(self, "wl_type_toggle", None) is not None:
+            self._style_toggle(self.wl_type_toggle, (self.wl_type_jobs_btn, self.wl_type_cron_btn))
+        if getattr(self, "pvx_type_toggle", None) is not None:
+            self._style_toggle(self.pvx_type_toggle, (self.pvx_type_pvc_btn, self.pvx_type_pv_btn))
+        if getattr(self, "wl_history_hdr", None) is not None:
+            self.wl_history_hdr.setStyleSheet(
+                f"background: {T['BG_PANEL']}; color: {T['TEXT_DIM']}; font-size: 13px; "
+                f"font-weight: 700; border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
+            )
+        if getattr(self, "wl_history_hint", None) is not None:
+            self.wl_history_hint.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px; padding: 12px;")
         if getattr(self, "tunnel_log", None) is not None:
             self.tunnel_log.setStyleSheet(
                 f"background: #0d0d1a; color: {T['TEXT_DIM']}; border: none; padding: 8px;"
@@ -1149,11 +1841,18 @@ class KubernetesTab(QWidget):
         names = out.strip().strip("'").split()
         self._namespaces = names
         current = self.ns_combo.currentText()
+        # A just-created namespace (see _create_namespace) takes priority
+        # over whatever was selected before, so the picker lands on the
+        # namespace that was just created instead of silently staying put.
+        pending = self._namespaces_pending_select
+        self._namespaces_pending_select = None
         self.ns_combo.blockSignals(True)
         self.ns_combo.clear()
         self.ns_combo.addItem("(all namespaces)")
         self.ns_combo.addItems(names)
-        if current in names:
+        if pending and pending in names:
+            self.ns_combo.setCurrentText(pending)
+        elif current in names:
             self.ns_combo.setCurrentText(current)
         elif "default" in names:
             self.ns_combo.setCurrentText("default")
@@ -1171,6 +1870,28 @@ class KubernetesTab(QWidget):
         if ns == "(all namespaces)" or not ns:
             return "--all-namespaces"
         return f"-n {ns}"
+
+    def _create_namespace(self):
+        if not self.ssh:
+            return
+        name, ok = QInputDialog.getText(self, "Create Namespace", "Namespace name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", name):
+            QMessageBox.warning(
+                self, "Invalid name",
+                "Namespace names must be lowercase alphanumeric or '-', "
+                "and must start/end with an alphanumeric character."
+            )
+            return
+
+        def on_done(out):
+            self._log(out)
+            self._namespaces_pending_select = name
+            self._load_namespaces()
+
+        self._run_cmd(f"kubectl create namespace {name} 2>&1", on_done)
 
     # ── Cluster health ────────────────────────────────────────
     def _check_cluster_health(self):
@@ -1217,6 +1938,13 @@ class KubernetesTab(QWidget):
         self.ing_list.clear()
         self.ing_count_lbl.setText("")
         self.ing_count_lbl.setStyleSheet("")
+        self.wl_list.clear()
+        self.wl_history_list.clear()
+        self.wl_count_lbl.setText("")
+        self.wl_count_lbl.setStyleSheet("")
+        self.pvx_list.clear()
+        self.pvx_count_lbl.setText("")
+        self.pvx_count_lbl.setStyleSheet("")
         self.cfg_list.clear()
         self.cfg_detail.clear()
         self.cfg_raw.clear()
@@ -1239,9 +1967,11 @@ class KubernetesTab(QWidget):
         elif idx == 4: self._load_hpas()
         elif idx == 5: self._load_services()
         elif idx == 6: self._load_ingress()
-        elif idx == 7: self._load_config_resources()
-        elif idx == 8: self._load_events()
-        elif idx == 9: self._refresh_tunnel_status()
+        elif idx == 7: self._load_workloads()
+        elif idx == 8: self._load_storage()
+        elif idx == 9: self._load_config_resources()
+        elif idx == 10: self._load_events()
+        elif idx == 11: self._refresh_tunnel_status()
 
     # ── Pods ──────────────────────────────────────────────────
     # `kubectl get pods -o wide` renders the RESTARTS column as a plain
