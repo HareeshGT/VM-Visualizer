@@ -242,7 +242,14 @@ class EC2FileManager(QMainWindow):
         self.act_connect    = _tbtn("⚡ Connect",   "Connect to server")
         self.act_disconnect = _tbtn("✕ Disconnect", "Disconnect")
         self.act_connect.clicked.connect(self._connect)
-        self.act_disconnect.clicked.connect(self._disconnect)
+        # clicked emits a bool (the button's checked state) — connecting
+        # directly to _disconnect(self, reason="Disconnected") lets that
+        # bool clobber the `reason` default, which later crashes
+        # self.status.showMessage(reason) with a TypeError (and, since
+        # it's raised inside a Qt-invoked slot, PyQt5 aborts the process
+        # instead of just printing a traceback). The lambda swallows the
+        # bool so _disconnect() always gets its intended default.
+        self.act_disconnect.clicked.connect(lambda: self._disconnect())
         tb.addWidget(self.act_connect)
         tb.addWidget(self.act_disconnect)
 
