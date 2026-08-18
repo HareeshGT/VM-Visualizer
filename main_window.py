@@ -129,6 +129,7 @@ class EC2FileManager(QMainWindow):
 
         self._inactivity_watcher = None
         self._lock_dlg_open      = False
+        self._lock_pending       = False
         self._setup_app_lock()
 
     # ── UI construction ───────────────────────────────────────
@@ -553,11 +554,30 @@ class EC2FileManager(QMainWindow):
         self._inactivity_watcher = security.InactivityWatcher(settings["autolock_minutes"])
         self._inactivity_watcher.idle_timeout.connect(self._show_lock_screen)
         QApplication.instance().installEventFilter(self._inactivity_watcher)
+        # The watcher's eventFilter only ever sees events aimed at this
+        # app's own widgets — if the user switches to another app, we
+        # receive nothing at all, so the idle clock silently keeps
+        # counting from the moment they left. When it then fires,
+        # _show_lock_screen() used to unconditionally build an
+        # always-on-top AppLockDialog and exec() it, which popped up and
+        # stole focus over whatever app the user was actually using.
+        # Tracking real focus via applicationStateChanged lets us defer
+        # that popup until the user is actually back in this app.
+        QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
         if settings["enabled"] and settings["pin_hash"]:
             QTimer.singleShot(0, self._show_lock_screen)
         else:
             self._inactivity_watcher.suspend()
+
+    def _on_app_state_changed(self, state):
+        # Fires when this app is brought back to the foreground (e.g. the
+        # user alt-tabs/cmd-tabs back in). If an auto-lock fired while we
+        # were in the background, show the lock screen now instead of
+        # having already popped it up over another app.
+        if state == Qt.ApplicationActive and self._lock_pending:
+            self._lock_pending = False
+            self._show_lock_screen()
 
     def _show_lock_screen(self):
         # Auto-lock can fire while a previous lock dialog is still being
@@ -566,6 +586,15 @@ class EC2FileManager(QMainWindow):
         settings = security.get_lock_settings()
         if self._lock_dlg_open or not settings["enabled"] or not settings["pin_hash"]:
             return
+
+        # Don't steal focus from another app the user is actively using —
+        # remember that a lock is owed and show it once they switch back.
+        if QApplication.instance().applicationState() != Qt.ApplicationActive:
+            self._lock_pending = True
+            if self._inactivity_watcher:
+                self._inactivity_watcher.suspend()
+            return
+
         self._lock_dlg_open = True
         if self._inactivity_watcher:
             self._inactivity_watcher.suspend()
