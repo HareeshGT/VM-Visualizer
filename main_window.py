@@ -861,8 +861,21 @@ class EC2FileManager(QMainWindow):
         # "lost" signal for a connection we're closing on purpose (see the
         # guard in _on_connection_lost).
         if self._health_worker:
-            self._health_worker.stop()
+            worker = self._health_worker
             self._health_worker = None
+            worker.stop()
+            # stop() only signals the loop to exit — run() is still
+            # unwinding on the worker's own OS thread when this line
+            # executes. Dropping our only reference to the QThread
+            # object without waiting for it to actually finish lets
+            # PyQt garbage-collect (and thus destroy) a QThread whose
+            # thread is still alive, which is a fatal
+            # "QThread: Destroyed while thread is still running" crash,
+            # not a catchable Python exception. wait() blocks briefly
+            # (the loop's own wait() unblocks near-instantly once
+            # _stop is set) until the thread has truly exited before we
+            # let the object go.
+            worker.wait(3000)
         try:
             if self.sftp: self.sftp.close()
             if self.ssh:  self.ssh.close()
