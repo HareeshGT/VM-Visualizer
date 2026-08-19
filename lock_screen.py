@@ -3,10 +3,19 @@ inactivity) and SetPinDialog (used from Settings to create/change the PIN).
 """
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QDialogButtonBox, QApplication, QGraphicsDropShadowEffect,
+    QDialog,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QDialogButtonBox,
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, pyqtProperty
 from PyQt5.QtGui import QFont, QColor
 
 from themes import T, apply_qss_to
@@ -22,174 +31,410 @@ def _alpha(hex_color: str, opacity: float) -> str:
     return f"rgba({r},{g},{b},{opacity})"
 
 
+def _soft_shadow(widget, blur=40, y=10, alpha=140):
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setXOffset(0)
+    shadow.setYOffset(y)
+    shadow.setColor(QColor(0, 0, 0, alpha))
+    widget.setGraphicsEffect(shadow)
+    return shadow
+
+
+class _PillField(QWidget):
+    """A rounded 'pill' container that hosts a leading glyph and a
+    QLineEdit with no border of its own — the wrapper owns the border,
+    so focus/hover states read as one continuous shape instead of a
+    plain boxed input."""
+
+    def __init__(self, glyph, placeholder, parent=None):
+        super().__init__(parent)
+        self.setObjectName("pillField")
+        self._focused = False
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(18, 0, 18, 0)
+        row.setSpacing(10)
+
+        glyph_lbl = QLabel(glyph)
+        glyph_lbl.setFixedWidth(18)
+        glyph_lbl.setAlignment(Qt.AlignCenter)
+        glyph_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 15px; background: transparent; border: none;")
+        row.addWidget(glyph_lbl)
+        self._glyph_lbl = glyph_lbl
+
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.Password)
+        self.edit.setAlignment(Qt.AlignLeft)
+        self.edit.setPlaceholderText(placeholder)
+        self.edit.setFixedHeight(52)
+        self.edit.setMaxLength(64)
+        self.edit.setFrame(False)
+        self.edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: transparent;
+                border: none;
+                color: {T['TEXT_PRIMARY']};
+                font-size: 17px;
+                font-weight: 600;
+                letter-spacing: 4px;
+                selection-background-color: {T['ACCENT']};
+            }}
+        """)
+        self.edit.installEventFilter(self)
+        row.addWidget(self.edit)
+
+        self._apply_style()
+
+    def eventFilter(self, obj, event):
+        if obj is self.edit:
+            if event.type() == event.FocusIn:
+                self._focused = True
+                self._apply_style()
+            elif event.type() == event.FocusOut:
+                self._focused = False
+                self._apply_style()
+        return super().eventFilter(obj, event)
+
+    def _apply_style(self):
+        if self._focused:
+            border = f"2px solid {T['ACCENT']}"
+            bg = _alpha(T['ACCENT'], 0.07)
+            pad_fix = 0
+        else:
+            border = f"1.5px solid {T['BORDER']}"
+            bg = T['BG_ITEM']
+            pad_fix = 1
+        self.setStyleSheet(f"""
+            QWidget#pillField {{
+                background: {bg};
+                border: {border};
+                border-radius: 16px;
+            }}
+        """)
+        self.layout().setContentsMargins(18 + pad_fix, 0, 18 + pad_fix, 0)
+
+    def text(self):
+        return self.edit.text()
+
+    def clear(self):
+        self.edit.clear()
+
+    def setFocus(self):
+        self.edit.setFocus()
+
+    def returnPressed(self):
+        return self.edit.returnPressed
+
+
 class AppLockDialog(QDialog):
-    """Blocking PIN-entry screen. exec_() returns QDialog.Accepted only
-    once the correct PIN is entered. Escape and the window's close button
-    are both disabled — dismissing this dialog any other way would defeat
-    the point of a lock screen — so the only way out besides unlocking is
-    the explicit "Quit" button."""
+    """Modern blocking PIN-entry lock screen."""
 
     def __init__(self, parent=None, title="EC2 Manager is locked"):
         super().__init__(parent)
+
         self.setWindowTitle("Locked")
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(
+            Qt.Dialog |
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint
+        )
         self.setModal(True)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(380)
+
+        self.setFixedSize(420, 480)
+
         apply_qss_to(self)
-        self.setStyleSheet(self.styleSheet() + f"""
-            QDialog {{
-                background: {T['BG_PANEL']};
-                border: 1px solid {T['BORDER']};
-                border-radius: 20px;
+
+        self.setStyleSheet("""
+            QDialog {
+                background: transparent;
+                border: none;
+            }
+        """)
+
+        # ---------------------------------------------------------
+        # Main card
+        # ---------------------------------------------------------
+        self.card = QWidget(self)
+        self.card.setObjectName("lockCard")
+        self.card.setGeometry(0, 0, self.width(), self.height())
+
+        self.card.setStyleSheet(f"""
+            QWidget#lockCard {{
+                background: qlineargradient(
+                    x1: 0, y1: 0,
+                    x2: 0, y2: 1,
+                    stop: 0 {_alpha(T['ACCENT'], 0.05)},
+                    stop: 0.35 {T['BG_PANEL']},
+                    stop: 1 {T['BG_PANEL']}
+                );
+                border: 1px solid {_alpha(T['BORDER'], 0.9)};
+                border-radius: 26px;
             }}
         """)
 
-        # Soft ambient shadow under the card so it reads as a floating
-        # sheet instead of a flat rectangle stamped onto the screen —
-        # works because the dialog itself is translucent, so the shadow
-        # is visible outside the rounded corners rather than clipped
-        # square by the window.
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(48)
-        shadow.setXOffset(0)
-        shadow.setYOffset(14)
-        shadow.setColor(QColor(0, 0, 0, 150))
-        self.setGraphicsEffect(shadow)
+        _soft_shadow(self.card, blur=60, y=20, alpha=170)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(36, 34, 36, 28)
-        lay.setSpacing(6)
+        lay = QVBoxLayout(self.card)
+        lay.setContentsMargins(40, 38, 40, 30)
+        lay.setSpacing(0)
 
-        # Padlock badge — a soft accent-tinted circle behind the glyph
-        # instead of a bare emoji floating on the background, so the
-        # icon reads as a deliberate focal point rather than clip art.
-        badge = QLabel("🔒")
-        badge.setFixedSize(64, 64)
-        badge.setAlignment(Qt.AlignCenter)
-        badge.setFont(QFont("Segoe UI Emoji", 26))
-        badge.setStyleSheet(f"""
-            background: {_alpha(T['ACCENT'], 0.16)};
-            border: 1px solid {_alpha(T['ACCENT'], 0.35)};
-            border-radius: 32px;
+        # ---------------------------------------------------------
+        # Lock icon — layered ring + badge for depth
+        # ---------------------------------------------------------
+        ring = QLabel()
+        ring.setFixedSize(84, 84)
+        ring.setAlignment(Qt.AlignCenter)
+        ring.setStyleSheet(f"""
+            QLabel {{
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 1, y2: 1,
+                    stop: 0 {_alpha(T['ACCENT'], 0.22)},
+                    stop: 1 {_alpha(T['ACCENT2'], 0.10)}
+                );
+                border: 1px solid {_alpha(T['ACCENT'], 0.38)};
+                border-radius: 42px;
+            }}
         """)
+
+        badge = QLabel("🔒", ring)
+        badge.setFixedSize(84, 84)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFont(QFont("Segoe UI Emoji", 28))
+        badge.setStyleSheet("background: transparent; border: none;")
+
         badge_row = QHBoxLayout()
         badge_row.addStretch()
-        badge_row.addWidget(badge)
+        badge_row.addWidget(ring)
         badge_row.addStretch()
-        lay.addLayout(badge_row)
-        lay.addSpacing(14)
 
+        lay.addLayout(badge_row)
+        lay.addSpacing(20)
+
+        # ---------------------------------------------------------
+        # Title
+        # ---------------------------------------------------------
         title_lbl = QLabel(title)
         title_lbl.setAlignment(Qt.AlignCenter)
         title_lbl.setWordWrap(True)
-        title_lbl.setStyleSheet(
-            f"color: {T['TEXT_PRIMARY']}; font-size: 17px; font-weight: 700; "
-            f"letter-spacing: 0.2px;"
-        )
-        lay.addWidget(title_lbl)
 
+        title_lbl.setStyleSheet(f"""
+            QLabel {{
+                color: {T['TEXT_PRIMARY']};
+                font-size: 20px;
+                font-weight: 700;
+                background: transparent;
+                border: none;
+            }}
+        """)
+
+        lay.addWidget(title_lbl)
+        lay.addSpacing(6)
+
+        # ---------------------------------------------------------
+        # Subtitle
+        # ---------------------------------------------------------
         sub_lbl = QLabel("Enter your PIN to continue")
         sub_lbl.setAlignment(Qt.AlignCenter)
-        sub_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12.5px; margin-top: 2px;")
-        lay.addWidget(sub_lbl)
 
-        lay.addSpacing(20)
-
-        self.pin_input = QLineEdit()
-        self.pin_input.setEchoMode(QLineEdit.Password)
-        self.pin_input.setAlignment(Qt.AlignCenter)
-        self.pin_input.setPlaceholderText("• • • •")
-        self.pin_input.setFixedHeight(46)
-        self.pin_input.returnPressed.connect(self._try_unlock)
-        self.pin_input.setStyleSheet(f"""
-            QLineEdit {{
-                background: {T['BG_ITEM']};
-                color: {T['TEXT_PRIMARY']};
-                border: 1.5px solid {T['BORDER']};
-                border-radius: 12px;
-                padding: 4px 14px;
-                font-size: 18px;
-                letter-spacing: 4px;
+        sub_lbl.setStyleSheet(f"""
+            QLabel {{
+                color: {T['TEXT_DIM']};
+                font-size: 13px;
+                background: transparent;
+                border: none;
             }}
-            QLineEdit:focus {{ border-color: {T['ACCENT']}; }}
         """)
-        lay.addWidget(self.pin_input)
 
+        lay.addWidget(sub_lbl)
+        lay.addSpacing(26)
+
+        # ---------------------------------------------------------
+        # PIN input (pill field w/ leading glyph)
+        # ---------------------------------------------------------
+        self.pin_field = _PillField("🔑", "Enter PIN", self.card)
+        self.pin_field.returnPressed().connect(self._try_unlock)
+        lay.addWidget(self.pin_field)
+        lay.addSpacing(6)
+
+        # ---------------------------------------------------------
+        # Error / status message
+        # ---------------------------------------------------------
         self.error_lbl = QLabel("")
         self.error_lbl.setAlignment(Qt.AlignCenter)
-        self.error_lbl.setFixedHeight(20)
-        self.error_lbl.setStyleSheet(
-            f"color: {T['DANGER']}; font-size: 12px; font-weight: 600; margin-top: 4px;"
-        )
+        self.error_lbl.setFixedHeight(22)
+
+        self.error_lbl.setStyleSheet(f"""
+            QLabel {{
+                color: {T['DANGER']};
+                font-size: 12px;
+                font-weight: 600;
+                background: transparent;
+                border: none;
+            }}
+        """)
+
         lay.addWidget(self.error_lbl)
+        lay.addSpacing(8)
 
-        lay.addSpacing(6)
+        # ---------------------------------------------------------
+        # Buttons
+        # ---------------------------------------------------------
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        btn_row.setSpacing(12)
 
+        # Quit
         quit_btn = QPushButton("Quit")
-        quit_btn.setFixedHeight(42)
+        quit_btn.setFixedHeight(48)
         quit_btn.setCursor(Qt.PointingHandCursor)
         quit_btn.clicked.connect(self._quit_app)
+
         quit_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
-                color: {T['DANGER']};
-                border: 1.5px solid {T['DANGER']};
-                border-radius: 21px;
-                font-weight: 600;
+                color: {T['TEXT_DIM']};
+                border: 1.5px solid {T['BORDER']};
+                border-radius: 24px;
                 font-size: 13px;
+                font-weight: 600;
+                padding: 0 22px;
             }}
-            QPushButton:hover  {{ background: {_alpha(T['DANGER'], 0.12)}; }}
-            QPushButton:pressed {{ background: {_alpha(T['DANGER'], 0.22)}; }}
+
+            QPushButton:hover {{
+                color: {T['DANGER']};
+                border-color: {T['DANGER']};
+                background: {_alpha(T['DANGER'], 0.08)};
+            }}
+
+            QPushButton:pressed {{
+                background: {_alpha(T['DANGER'], 0.16)};
+            }}
         """)
+
         btn_row.addWidget(quit_btn)
 
+        # Unlock
         unlock_btn = QPushButton("Unlock")
-        unlock_btn.setFixedHeight(42)
+        unlock_btn.setFixedHeight(48)
         unlock_btn.setCursor(Qt.PointingHandCursor)
         unlock_btn.clicked.connect(self._try_unlock)
+
         unlock_btn.setStyleSheet(f"""
             QPushButton {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {T['ACCENT']}, stop:1 {T['ACCENT2']});
+                background: qlineargradient(
+                    x1: 0, y1: 0,
+                    x2: 1, y2: 0,
+                    stop: 0 {T['ACCENT']},
+                    stop: 1 {T['ACCENT2']}
+                );
                 color: white;
                 border: none;
-                border-radius: 21px;
-                font-weight: 700;
+                border-radius: 24px;
                 font-size: 13px;
+                font-weight: 700;
             }}
-            QPushButton:hover  {{ background: {T['ACCENT2']}; }}
-            QPushButton:pressed {{ background: {T['ACCENT']}; }}
+
+            QPushButton:hover {{
+                background: qlineargradient(
+                    x1: 0, y1: 0,
+                    x2: 1, y2: 0,
+                    stop: 0 {T['ACCENT2']},
+                    stop: 1 {T['ACCENT2']}
+                );
+            }}
+
+            QPushButton:pressed {{
+                background: {T['ACCENT']};
+            }}
         """)
+
         btn_row.addWidget(unlock_btn, 1)
+
         lay.addLayout(btn_row)
 
-        self.pin_input.setFocus()
+        # ---------------------------------------------------------
+        # Bottom hint
+        # ---------------------------------------------------------
+        lay.addStretch()
 
-    # ── Lock-screen hardening ───────────────────────────────────
+        hint = QLabel("🛡  Your session is protected")
+        hint.setAlignment(Qt.AlignCenter)
+
+        hint.setStyleSheet(f"""
+            QLabel {{
+                color: {T['TEXT_DIM']};
+                font-size: 11px;
+                background: transparent;
+                border: none;
+            }}
+        """)
+
+        lay.addWidget(hint)
+
+        self.pin_field.setFocus()
+
+        # Fade the whole dialog in on show for a less abrupt appearance.
+        self._opacity_fx = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_fx)
+        self._fade_anim = QPropertyAnimation(self._opacity_fx, b"opacity", self)
+        self._fade_anim.setDuration(180)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fade_anim.stop()
+        self._fade_anim.start()
+
+    # -------------------------------------------------------------
+    # Lock-screen hardening
+    # -------------------------------------------------------------
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             event.ignore()
             return
+
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        # No 'X' escape hatch — only unlocking or the Quit button leave
-        # this dialog.
+        # Prevent the window manager from bypassing the lock.
         event.ignore()
 
-    # ── Behavior ──────────────────────────────────────────────
+    # -------------------------------------------------------------
+    # Behavior
+    # -------------------------------------------------------------
+
     def _try_unlock(self):
         settings = get_lock_settings()
-        pin = self.pin_input.text()
-        if verify_pin(pin, settings["salt"], settings["pin_hash"]):
+        pin = self.pin_field.text()
+
+        if verify_pin(
+            pin,
+            settings["salt"],
+            settings["pin_hash"]
+        ):
             self.accept()
             return
-        self.error_lbl.setText("Incorrect PIN — try again.")
-        self.pin_input.clear()
-        self.pin_input.setFocus()
+
+        self.error_lbl.setText("Incorrect PIN. Please try again.")
+        self.pin_field.clear()
+        self.pin_field.setFocus()
+        self._shake_card()
+
+    def _shake_card(self):
+        anim = QPropertyAnimation(self, b"pos", self)
+        anim.setDuration(320)
+        start = self.pos()
+        offsets = [0, -10, 8, -6, 4, 0]
+        steps = len(offsets) - 1
+        for i, off in enumerate(offsets):
+            anim.setKeyValueAt(i / steps, QPoint(start.x() + off, start.y()))
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
+        self._shake_anim = anim  # keep a reference alive
 
     def _quit_app(self):
         QApplication.instance().quit()
@@ -202,52 +447,150 @@ class SetPinDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Set PIN")
-        self.setFixedWidth(340)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(360)
         apply_qss_to(self)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 16)
-        lay.setSpacing(8)
+        self.setStyleSheet("QDialog { background: transparent; border: none; }")
 
+        card = QWidget(self)
+        card.setObjectName("setPinCard")
+        card.setStyleSheet(f"""
+            QWidget#setPinCard {{
+                background: {T['BG_PANEL']};
+                border: 1px solid {_alpha(T['BORDER'], 0.9)};
+                border-radius: 20px;
+            }}
+        """)
+        _soft_shadow(card, blur=45, y=14, alpha=150)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(card)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(28, 26, 28, 22)
+        lay.setSpacing(4)
+
+        header_row = QHBoxLayout()
+        icon_lbl = QLabel("🔑")
+        icon_lbl.setFixedSize(40, 40)
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet(f"""
+            QLabel {{
+                background: {_alpha(T['ACCENT'], 0.14)};
+                border: 1px solid {_alpha(T['ACCENT'], 0.32)};
+                border-radius: 20px;
+                font-size: 17px;
+            }}
+        """)
+        header_row.addWidget(icon_lbl)
+        header_row.addSpacing(10)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(0)
         title = QLabel("Set a PIN")
-        title.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 14px; font-weight: 700;")
-        lay.addWidget(title)
+        title.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 16px; font-weight: 700; background: transparent; border: none;")
+        subtitle = QLabel("Used to lock EC2 Manager when idle")
+        subtitle.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px; background: transparent; border: none;")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header_row.addLayout(title_box)
+        header_row.addStretch()
 
-        lay.addWidget(QLabel("New PIN  (4+ characters)"))
-        self.pin1 = QLineEdit()
-        self.pin1.setEchoMode(QLineEdit.Password)
-        lay.addWidget(self.pin1)
+        lay.addLayout(header_row)
+        lay.addSpacing(22)
 
-        lay.addWidget(QLabel("Confirm PIN"))
-        self.pin2 = QLineEdit()
-        self.pin2.setEchoMode(QLineEdit.Password)
-        self.pin2.returnPressed.connect(self._on_ok)
-        lay.addWidget(self.pin2)
+        def field_label(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11.5px; font-weight: 600; background: transparent; border: none;")
+            return lbl
+
+        lay.addWidget(field_label("NEW PIN  ·  4+ CHARACTERS"))
+        lay.addSpacing(6)
+        self.pin1_field = _PillField("●", "New PIN", card)
+        lay.addWidget(self.pin1_field)
+        lay.addSpacing(16)
+
+        lay.addWidget(field_label("CONFIRM PIN"))
+        lay.addSpacing(6)
+        self.pin2_field = _PillField("●", "Confirm PIN", card)
+        self.pin2_field.returnPressed().connect(self._on_ok)
+        lay.addWidget(self.pin2_field)
+        lay.addSpacing(10)
 
         self.error_lbl = QLabel("")
-        self.error_lbl.setFixedHeight(16)
-        self.error_lbl.setStyleSheet(f"color: {T['DANGER']}; font-size: 12px;")
+        self.error_lbl.setFixedHeight(18)
+        self.error_lbl.setStyleSheet(f"color: {T['DANGER']}; font-size: 12px; font-weight: 600; background: transparent; border: none;")
         lay.addWidget(self.error_lbl)
+        lay.addSpacing(6)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.button(QDialogButtonBox.Ok).setText("Save")
-        btns.button(QDialogButtonBox.Ok).setObjectName("primary")
-        btns.accepted.connect(self._on_ok)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(44)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {T['TEXT_DIM']};
+                border: 1.5px solid {T['BORDER']};
+                border-radius: 22px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                border-color: {_alpha(T['ACCENT'], 0.6)};
+                color: {T['TEXT_PRIMARY']};
+            }}
+        """)
+        btn_row.addWidget(cancel_btn)
+
+        save_btn = QPushButton("Save")
+        save_btn.setFixedHeight(44)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self._on_ok)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 {T['ACCENT']}, stop: 1 {T['ACCENT2']}
+                );
+                color: white;
+                border: none;
+                border-radius: 22px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{
+                background: {T['ACCENT2']};
+            }}
+            QPushButton:pressed {{
+                background: {T['ACCENT']};
+            }}
+        """)
+        btn_row.addWidget(save_btn, 1)
+
+        lay.addLayout(btn_row)
 
         self._pin_value = None
-        self.pin1.setFocus()
+        self.pin1_field.setFocus()
+
+        self.adjustSize()
 
     def _on_ok(self):
-        p1, p2 = self.pin1.text(), self.pin2.text()
+        p1, p2 = self.pin1_field.text(), self.pin2_field.text()
         if len(p1) < 4:
             self.error_lbl.setText("PIN must be at least 4 characters.")
             return
         if p1 != p2:
             self.error_lbl.setText("PINs don't match.")
-            self.pin2.clear()
-            self.pin2.setFocus()
+            self.pin2_field.clear()
+            self.pin2_field.setFocus()
             return
         self._pin_value = p1
         self.accept()
