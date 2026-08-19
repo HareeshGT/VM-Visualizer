@@ -36,44 +36,44 @@ THEMES = {
         "SUCCESS": "#22c55e", "DANGER": "#ef4444", "WARNING": "#f59e0b", "INFO": "#60a5fa",
     },
 
-    "Royal Amethyst": {
-        "BG_DARK": "#0a0911", "BG_PANEL": "#12101b", "BG_SIDEBAR": "#08070e",
-        "BG_ITEM": "#1a1727", "BG_ITEM_SEL": "#3b2463", "BG_HOVER": "#242035",
-        "ACCENT": "#a855f7", "ACCENT2": "#d8b4fe", "TEXT_PRIMARY": "#faf5ff",
-        "TEXT_DIM": "#ddd6fe", "TEXT_MUTED": "#a78bfa", "BORDER": "#302a40",
-        "SUCCESS": "#22c55e", "DANGER": "#fb7185", "WARNING": "#fbbf24", "INFO": "#60a5fa",
+        "Cyberpunk Neon": {
+        "BG_DARK": "#08060f", "BG_PANEL": "#100b1e", "BG_SIDEBAR": "#060411",
+        "BG_ITEM": "#1a1330", "BG_ITEM_SEL": "#ff2e88", "BG_HOVER": "#241a3f",
+        "ACCENT": "#ff2e88", "ACCENT2": "#00f0ff", "TEXT_PRIMARY": "#f5f0ff",
+        "TEXT_DIM": "#d9c9f0", "TEXT_MUTED": "#8a7aab", "BORDER": "#2e2350",
+        "SUCCESS": "#39ff14", "DANGER": "#ff2e63", "WARNING": "#fce83a", "INFO": "#00f0ff",
     },
 
-    "Ocean Luxe": {
-        "BG_DARK": "#071019", "BG_PANEL": "#0d1722", "BG_SIDEBAR": "#050d16",
-        "BG_ITEM": "#142232", "BG_ITEM_SEL": "#123d5a", "BG_HOVER": "#1a2b3f",
-        "ACCENT": "#06b6d4", "ACCENT2": "#67e8f9", "TEXT_PRIMARY": "#ecfeff",
-        "TEXT_DIM": "#cce7ee", "TEXT_MUTED": "#8cb8c4", "BORDER": "#24384a",
-        "SUCCESS": "#22c55e", "DANGER": "#ef4444", "WARNING": "#f59e0b", "INFO": "#38bdf8",
+    "Rose Gold": {
+        "BG_DARK": "#140c0e", "BG_PANEL": "#1e1315", "BG_SIDEBAR": "#0f0809",
+        "BG_ITEM": "#2b1a1d", "BG_ITEM_SEL": "#7a3a3f", "BG_HOVER": "#372023",
+        "ACCENT": "#f0a6a3", "ACCENT2": "#e8b4bc", "TEXT_PRIMARY": "#fff0ee",
+        "TEXT_DIM": "#e8c4c0", "TEXT_MUTED": "#b98d8a", "BORDER": "#3d2529",
+        "SUCCESS": "#4ade80", "DANGER": "#f87171", "WARNING": "#fbbf24", "INFO": "#93c5fd",
     },
 
-    "Velvet Ruby": {
-        "BG_DARK": "#10070a", "BG_PANEL": "#180d11", "BG_SIDEBAR": "#0d0508",
-        "BG_ITEM": "#231218", "BG_ITEM_SEL": "#5a1f32", "BG_HOVER": "#2e1820",
-        "ACCENT": "#f43f5e", "ACCENT2": "#fda4af", "TEXT_PRIMARY": "#fff1f2",
-        "TEXT_DIM": "#f1cbd0", "TEXT_MUTED": "#c08497", "BORDER": "#3d242d",
-        "SUCCESS": "#22c55e", "DANGER": "#fb7185", "WARNING": "#fbbf24", "INFO": "#60a5fa",
+    "Arctic Frost": {
+        "BG_DARK": "#080d13", "BG_PANEL": "#0f161f", "BG_SIDEBAR": "#060a0f",
+        "BG_ITEM": "#16202c", "BG_ITEM_SEL": "#1e5f7a", "BG_HOVER": "#1c2a38",
+        "ACCENT": "#7dd3fc", "ACCENT2": "#e0f2fe", "TEXT_PRIMARY": "#f0f9ff",
+        "TEXT_DIM": "#cfe8f7", "TEXT_MUTED": "#8fb4c9", "BORDER": "#233647",
+        "SUCCESS": "#5eead4", "DANGER": "#fb7185", "WARNING": "#fde047", "INFO": "#7dd3fc",
     },
 
-    "Emerald Noir": {
-        "BG_DARK": "#08110d", "BG_PANEL": "#0f1814", "BG_SIDEBAR": "#060d0a",
-        "BG_ITEM": "#15211c", "BG_ITEM_SEL": "#164e3a", "BG_HOVER": "#1d2c26",
-        "ACCENT": "#10b981", "ACCENT2": "#6ee7b7", "TEXT_PRIMARY": "#ecfdf5",
-        "TEXT_DIM": "#cdebdc", "TEXT_MUTED": "#86b8a1", "BORDER": "#284037",
-        "SUCCESS": "#22c55e", "DANGER": "#ef4444", "WARNING": "#f59e0b", "INFO": "#38bdf8",
+    "Toxic Lime": {
+        "BG_DARK": "#0a0f08", "BG_PANEL": "#121a0e", "BG_SIDEBAR": "#080c06",
+        "BG_ITEM": "#1a2614", "BG_ITEM_SEL": "#3f6b1a", "BG_HOVER": "#233118",
+        "ACCENT": "#a3e635", "ACCENT2": "#d9f99d", "TEXT_PRIMARY": "#f7ffe8",
+        "TEXT_DIM": "#dbf0b0", "TEXT_MUTED": "#9cb87a", "BORDER": "#2e4020",
+        "SUCCESS": "#a3e635", "DANGER": "#f87171", "WARNING": "#fbbf24", "INFO": "#60a5fa",
     },
 
-    "Carbon Ice": {
-        "BG_DARK": "#0a0c10", "BG_PANEL": "#11141a", "BG_SIDEBAR": "#080a0e",
-        "BG_ITEM": "#181d25", "BG_ITEM_SEL": "#24364d", "BG_HOVER": "#202733",
-        "ACCENT": "#60a5fa", "ACCENT2": "#bfdbfe", "TEXT_PRIMARY": "#f8fafc",
-        "TEXT_DIM": "#dbe5f0", "TEXT_MUTED": "#94a3b8", "BORDER": "#2b3442",
-        "SUCCESS": "#22c55e", "DANGER": "#ef4444", "WARNING": "#f59e0b", "INFO": "#38bdf8",
+    "Blood Moon": {
+        "BG_DARK": "#0d0605", "BG_PANEL": "#170a08", "BG_SIDEBAR": "#0a0403",
+        "BG_ITEM": "#241110", "BG_ITEM_SEL": "#6b1414", "BG_HOVER": "#301715",
+        "ACCENT": "#dc2626", "ACCENT2": "#f87171", "TEXT_PRIMARY": "#fef2f2",
+        "TEXT_DIM": "#f0c2c2", "TEXT_MUTED": "#b08484", "BORDER": "#3d1a1a",
+        "SUCCESS": "#4ade80", "DANGER": "#dc2626", "WARNING": "#fbbf24", "INFO": "#60a5fa",
     },
 }
 
@@ -110,8 +110,18 @@ def load_settings():
 
 
 def apply_theme_vars(theme_name: str):
-    """Populate the global T dict from the named theme."""
+    """Populate the global T dict from the named theme.
+
+    Falls back to "App Default" if theme_name isn't a known theme —
+    e.g. settings.json was saved by a build with a theme that's since
+    been renamed/removed, or was hand-edited/corrupted. Without this
+    check, THEMES[theme_name] raises KeyError, which happens at import
+    time (see the bootstrap call below) and prevents the app from
+    starting at all.
+    """
     global CURRENT_THEME
+    if theme_name not in THEMES:
+        theme_name = "App Default"
     CURRENT_THEME = theme_name
     T.update(THEMES[theme_name])
 
