@@ -104,6 +104,11 @@ def main() -> int:
         window_ref["window"].raise_()
         window_ref["window"].activateWindow()
         splash.close()
+        # Only check whether to show the lock screen once the window is
+        # fully raised/activated and the splash is gone — see
+        # check_initial_lock()'s docstring in main_window.py for why this
+        # can't happen any earlier.
+        window_ref["window"].check_initial_lock()
 
     splash.finished.connect(_begin_zoom)
     splash.show()

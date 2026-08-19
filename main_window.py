@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, QSize, QPropertyAnimation, QEasingCurve, QRect, QPoint,
-    QParallelAnimationGroup, QTimer,
+    QParallelAnimationGroup,
 )
 from PyQt5.QtGui import QFont, QColor, QPalette, QKeySequence
 
@@ -546,10 +546,9 @@ class EC2FileManager(QMainWindow):
 
     # ── App lock (security) ─────────────────────────────────────
     def _setup_app_lock(self):
-        """Installs the app-wide inactivity watcher and, if the app lock
-        is enabled, shows the lock screen once the window has finished
-        constructing (so the modal dialog has something to sit on top
-        of)."""
+        """Installs the app-wide inactivity watcher. Does NOT show the
+        lock screen at launch — see check_initial_lock() for why that's
+        kept separate."""
         settings = security.get_lock_settings()
         self._inactivity_watcher = security.InactivityWatcher(settings["autolock_minutes"])
         self._inactivity_watcher.idle_timeout.connect(self._show_lock_screen)
@@ -565,10 +564,34 @@ class EC2FileManager(QMainWindow):
         # that popup until the user is actually back in this app.
         QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
-        if settings["enabled"] and settings["pin_hash"]:
-            QTimer.singleShot(0, self._show_lock_screen)
-        else:
+        if not (settings["enabled"] and settings["pin_hash"]):
             self._inactivity_watcher.suspend()
+
+    def check_initial_lock(self):
+        """Shows the lock screen at launch, if enabled. Must be called by
+        main.py only AFTER the splash-to-window crossfade has fully
+        finished and window.raise_()/activateWindow() have already run —
+        not from inside __init__.
+
+        Previously this ran via QTimer.singleShot(0, ...) fired from
+        _setup_app_lock() during __init__. main.py's _begin_zoom()
+        constructs the window, shows it at opacity 0, and starts a
+        ~420ms splash<->window crossfade before returning control to the
+        event loop — so that singleShot(0) fired almost immediately,
+        opening the modal AppLockDialog while the crossfade was still in
+        flight. ~420ms later, the crossfade's on_done callback called
+        window.raise_() and window.activateWindow() on the *parent*
+        window while the lock dialog was still exec()-ing underneath —
+        which could reorder the frameless always-on-top lock dialog
+        behind the newly-activated main window. The dialog would
+        visually vanish ("pops up and goes off") while still being the
+        modal loop blocking all input, leaving nothing on screen to
+        interact with. Deferring this call until after the window is
+        fully raised/activated removes the race entirely.
+        """
+        settings = security.get_lock_settings()
+        if settings["enabled"] and settings["pin_hash"]:
+            self._show_lock_screen()
 
     def _on_app_state_changed(self, state):
         # Fires when this app is brought back to the foreground (e.g. the

@@ -13,7 +13,6 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QApplication,
     QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect,
 )
 from PyQt5.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, pyqtProperty
 from PyQt5.QtGui import QFont, QColor
@@ -373,20 +372,16 @@ class AppLockDialog(QDialog):
         lay.addWidget(hint)
 
         self.pin_field.setFocus()
-
-        # Fade the whole dialog in on show for a less abrupt appearance.
-        self._opacity_fx = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self._opacity_fx)
-        self._fade_anim = QPropertyAnimation(self._opacity_fx, b"opacity", self)
-        self._fade_anim.setDuration(180)
-        self._fade_anim.setStartValue(0.0)
-        self._fade_anim.setEndValue(1.0)
-        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._fade_anim.stop()
-        self._fade_anim.start()
+        # No fade-in / windowOpacity animation on this dialog on purpose.
+        # It's a frameless, WA_TranslucentBackground, always-on-top modal
+        # top-level window — animating its opacity (via either
+        # QGraphicsOpacityEffect or windowOpacity) has been a repeated
+        # source of "dialog flashes in then goes fully blank while still
+        # modal" on macOS/Cocoa, which is much worse than losing a 180ms
+        # cosmetic fade. If a fade-in is wanted later, it should be done
+        # by fading the *card* widget's own background alpha in via a
+        # QSS/paint-based approach instead of touching windowOpacity or
+        # QGraphicsOpacityEffect on the top-level window.
 
     # -------------------------------------------------------------
     # Lock-screen hardening
