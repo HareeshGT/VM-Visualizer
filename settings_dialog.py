@@ -4,11 +4,13 @@ Kubernetes tab visibility."""
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
     QComboBox, QTabWidget, QWidget, QScrollArea, QDialogButtonBox, QFrame,
+    QLineEdit,
 )
 from PyQt5.QtGui import QFont
 
 from themes import T, apply_qss_to, load_settings, save_settings
 import security
+import ai_assist
 from lock_screen import SetPinDialog
 
 _AUTOLOCK_OPTIONS = [
@@ -45,6 +47,7 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_security_tab(), "🔒  Security")
         tabs.addTab(self._build_k8s_tab(), "⎈  Kubernetes Tabs")
+        tabs.addTab(self._build_ai_tab(), "🤖  AI")
         lay.addWidget(tabs, 1)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -154,6 +157,76 @@ class SettingsDialog(QDialog):
         v.addWidget(scroll, 1)
         return w
 
+    # ── AI tab ────────────────────────────────────────────────
+    def _build_ai_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setSpacing(10)
+        v.setContentsMargins(4, 14, 4, 4)
+
+        desc = QLabel(
+            "Used by the ✨ Explain button in pod log/exec views to get an "
+            "AI diagnosis of crashes and errors. Pick a provider and paste "
+            "its API key — each provider's key is stored locally and sent "
+            "only to that provider's own API."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        v.addWidget(desc)
+
+        # Keys are kept per-provider so switching providers in the combo
+        # box doesn't lose whatever key was entered for the others; only
+        # the field for the currently-selected provider is shown at once.
+        ai_settings = ai_assist.get_ai_settings()
+        self._ai_keys = dict(ai_settings["api_keys"])
+        self._current_provider_id = None
+
+        v.addSpacing(4)
+        v.addWidget(QLabel("Provider"))
+        self.provider_combo = QComboBox()
+        for pid, info in ai_assist.PROVIDERS.items():
+            self.provider_combo.addItem(info["label"], pid)
+        v.addWidget(self.provider_combo)
+
+        v.addWidget(QLabel("API key"))
+        row = QHBoxLayout()
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        row.addWidget(self.api_key_edit, 1)
+
+        self.show_key_btn = QPushButton("Show")
+        self.show_key_btn.setCheckable(True)
+        self.show_key_btn.setFixedWidth(60)
+        self.show_key_btn.toggled.connect(self._on_toggle_show_key)
+        row.addWidget(self.show_key_btn)
+        v.addLayout(row)
+
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        idx = self.provider_combo.findData(ai_settings["provider"])
+        # setCurrentIndex fires currentIndexChanged, which populates the
+        # key field for whichever provider ends up selected — including
+        # the idx < 0 fallback (an unrecognized/removed provider id).
+        self.provider_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        v.addStretch()
+        return w
+
+    def _on_provider_changed(self, _index):
+        # Stash whatever's currently typed under the provider we're
+        # leaving, then load the field with the key already saved (if any)
+        # for the newly-selected one.
+        if self._current_provider_id is not None:
+            self._ai_keys[self._current_provider_id] = self.api_key_edit.text()
+
+        pid = self.provider_combo.currentData()
+        self._current_provider_id = pid
+        self.api_key_edit.setText(self._ai_keys.get(pid, ""))
+        self.api_key_edit.setPlaceholderText(ai_assist.PROVIDERS[pid]["key_placeholder"])
+
+    def _on_toggle_show_key(self, checked):
+        self.api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+        self.show_key_btn.setText("Hide" if checked else "Show")
+
     # ── Save ──────────────────────────────────────────────────
     def _on_save(self):
         # Security
@@ -173,6 +246,10 @@ class SettingsDialog(QDialog):
 
         # Kubernetes tab visibility
         save_settings(k8s_hidden_tabs=self.hidden_k8s_tabs())
+
+        # AI
+        self._ai_keys[self._current_provider_id] = self.api_key_edit.text()
+        ai_assist.save_ai_settings(self.provider_combo.currentData(), self._ai_keys)
 
         self.accept()
 

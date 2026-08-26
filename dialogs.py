@@ -26,6 +26,7 @@ from themes import T, apply_qss_to
 from utils import load_recent_instances, size_fmt, append_terminal_html, append_terminal_text, html_escape, monospace_font
 from workers import CommandWorker, _TransferWorker, ScpTransferWorker, track_worker, FileStreamReadWorker, MediaStreamServer, _StreamServerStartWorker
 from editor_widgets import CodeEditor, make_highlighter, LANG_LABEL
+import ai_assist
 
 # QtMultimedia is an optional Qt component — most PyQt5 installs on macOS
 # and Linux ship it, but guard the import so a system missing the
@@ -471,6 +472,59 @@ class ConnectingDialog(QDialog):
 
 
 # ─── K8s log viewer ───────────────────────────────────────────
+# ─── AI diagnosis result ─────────────────────────────────────
+class AIExplainDialog(QDialog):
+    """Read-only panel showing the AI's diagnosis of a pod's log output.
+    Kept as a separate small dialog (rather than inlining into
+    LogViewerDialog) so it can be re-shown/copied/closed independently of
+    the still-streaming log view underneath it."""
+
+    def __init__(self, parent, title: str):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(560, 420)
+        apply_qss_to(self)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        header = QLabel("✨  AI diagnosis")
+        header.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 14px; font-weight: 700;")
+        layout.addWidget(header)
+
+        self.body = QTextBrowser()
+        self.body.setOpenExternalLinks(True)
+        self.body.setStyleSheet(
+            f"background: {T['BG_ITEM']}; color: {T['TEXT_PRIMARY']}; "
+            f"border: 1px solid {T['BORDER']}; border-radius: 6px; padding: 10px;"
+        )
+        layout.addWidget(self.body, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        copy_btn = QPushButton("Copy")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.body.toPlainText()))
+        btn_row.addWidget(copy_btn)
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("primary")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def set_loading(self):
+        self.body.setPlainText("Thinking…")
+
+    def set_markdown(self, text: str):
+        # QTextBrowser has built-in (basic) Markdown rendering, which is
+        # enough for the bold section headers / bullet list the prompt asks
+        # the model to reply with.
+        self.body.setMarkdown(text)
+
+    def set_error(self, message: str):
+        self.body.setPlainText(f"⚠ {message}")
+
+
 class LogViewerDialog(QDialog):
     """Live-tails pod logs (kubectl logs -f) instead of one-shot fetches.
     Uses _ExecStreamWorker (same streaming machinery as FileExecDialog) to
@@ -485,6 +539,8 @@ class LogViewerDialog(QDialog):
         self._container     = container
         self._workers       = []
         self._stream_worker = None   # the currently-running _ExecStreamWorker, if any
+        self._ai_worker     = None   # the currently-running AIExplainWorker, if any
+        self._ai_dialog     = None
 
         self.setWindowTitle(f"Logs — {pod}")
         self.resize(900, 600)
@@ -530,6 +586,11 @@ class LogViewerDialog(QDialog):
         copy_btn = QPushButton("Copy")
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log_view.toPlainText()))
         ctrl.addWidget(copy_btn)
+
+        self.explain_btn = QPushButton("✨  Explain")
+        self.explain_btn.setToolTip("Ask AI to diagnose this log output")
+        self.explain_btn.clicked.connect(self._on_explain)
+        ctrl.addWidget(self.explain_btn)
         layout.addLayout(ctrl)
 
         self.log_view = QTextEdit()
@@ -612,10 +673,61 @@ class LogViewerDialog(QDialog):
             self.status_lbl.setText("○ stream ended")
             self.status_lbl.setStyleSheet(f"color: {T['TEXT_DIM']};")
 
+    # ── AI diagnosis ──────────────────────────────────────────
+    def _on_explain(self):
+        if self._ai_worker is not None:
+            return  # already running — button is disabled while it is, but be defensive
+
+        log_text = self.log_view.toPlainText().strip()
+        if not log_text or log_text == "Loading…":
+            QMessageBox.information(self, "Nothing to explain", "There's no log output yet.")
+            return
+
+        provider = ai_assist.get_provider()
+        api_key = ai_assist.get_api_key(provider)
+        if not api_key:
+            label = ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
+            QMessageBox.information(
+                self, "No API key set",
+                f"Add a {label} API key in Settings → 🤖 AI to use this feature."
+            )
+            return
+
+        self._ai_dialog = AIExplainDialog(self, f"AI diagnosis — {self._pod}")
+        self._ai_dialog.set_loading()
+        self._ai_dialog.show()
+
+        self.explain_btn.setEnabled(False)
+        self.explain_btn.setText("✨  Thinking…")
+
+        worker = ai_assist.AIExplainWorker(
+            provider, api_key, self._pod, self._ns, self._container, log_text
+        )
+        worker.done.connect(self._on_explain_done)
+        worker.error.connect(self._on_explain_error)
+        self._ai_worker = worker
+        worker.finished.connect(self._on_explain_finished)
+        worker.start()
+
+    def _on_explain_done(self, text: str):
+        if self._ai_dialog is not None:
+            self._ai_dialog.set_markdown(text)
+
+    def _on_explain_error(self, message: str):
+        if self._ai_dialog is not None:
+            self._ai_dialog.set_error(message)
+
+    def _on_explain_finished(self):
+        self._ai_worker = None
+        self.explain_btn.setEnabled(True)
+        self.explain_btn.setText("✨  Explain")
+
     def closeEvent(self, event):
         # Stop the SSH channel/thread rather than leaking it once the dialog closes.
         if self._stream_worker is not None:
             self._stream_worker.request_stop()
+        if self._ai_worker is not None:
+            self._ai_worker.quit()
         super().closeEvent(event)
 
 
