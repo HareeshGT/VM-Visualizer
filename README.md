@@ -69,7 +69,6 @@ The application is organized into modular components:
 | `terminal_widget.py` | `TerminalWidget` — the integrated terminal emulator surface |
 
 ## Requirements
-
 - Python 3
 - PyQt5
 - [paramiko](https://www.paramiko.org/) (for SSH/SFTP connectivity)
