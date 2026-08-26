@@ -474,10 +474,7 @@ class ConnectingDialog(QDialog):
 # ─── K8s log viewer ───────────────────────────────────────────
 # ─── AI diagnosis result ─────────────────────────────────────
 class AIExplainDialog(QDialog):
-    """Read-only panel showing the AI's diagnosis of a pod's log output.
-    Kept as a separate small dialog (rather than inlining into
-    LogViewerDialog) so it can be re-shown/copied/closed independently of
-    the still-streaming log view underneath it."""
+    """Read-only panel showing the AI's diagnosis of a pod's log output."""
 
     def __init__(self, parent, title: str):
         super().__init__(parent)
@@ -490,7 +487,9 @@ class AIExplainDialog(QDialog):
         layout.setSpacing(10)
 
         header = QLabel("✨  AI diagnosis")
-        header.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 14px; font-weight: 700;")
+        header.setStyleSheet(
+            f"color: {T['TEXT_PRIMARY']}; font-size: 14px; font-weight: 700;"
+        )
         layout.addWidget(header)
 
         self.body = QTextBrowser()
@@ -499,39 +498,56 @@ class AIExplainDialog(QDialog):
             f"background: {T['BG_ITEM']}; color: {T['TEXT_PRIMARY']}; "
             f"border: 1px solid {T['BORDER']}; border-radius: 6px; padding: 10px;"
         )
-        # The widget stylesheet above only covers the QTextBrowser chrome
-        # (background/border/padding) — it doesn't reach the rendered
-        # Markdown content inside. This is the document's own CSS, and is
-        # what actually gives the ### section headings breathing room
-        # above/below instead of butting straight up against the
-        # paragraph before them.
+
         self.body.document().setDefaultStyleSheet(
             "h1, h2, h3 { margin-top: 14px; margin-bottom: 6px; }"
             "p, ul, ol { margin-top: 4px; margin-bottom: 4px; }"
         )
+
         layout.addWidget(self.body, 1)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+
         copy_btn = QPushButton("Copy")
-        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.body.toPlainText()))
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(
+                self.body.toPlainText()
+            )
+        )
         btn_row.addWidget(copy_btn)
+
         close_btn = QPushButton("Close")
         close_btn.setObjectName("primary")
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
+
         layout.addLayout(btn_row)
 
+        # Loading animation
+        self._loading_timer = QTimer(self)
+        self._loading_timer.timeout.connect(self._update_loading_text)
+        self._loading_dots = 0
+
     def set_loading(self):
-        self.body.setPlainText("Thinking…")
+        self._loading_dots = 0
+        self.body.setPlainText("Thinking")
+        self._loading_timer.start(400)
+
+    def _update_loading_text(self):
+        self._loading_dots = (self._loading_dots + 1) % 4
+        dots = "." * self._loading_dots
+        self.body.setPlainText(f"Thinking{dots}")
+
+    def stop_loading(self):
+        self._loading_timer.stop()
 
     def set_markdown(self, text: str):
-        # QTextBrowser has built-in (basic) Markdown rendering, which is
-        # enough for the bold section headers / bullet list the prompt asks
-        # the model to reply with.
+        self.stop_loading()
         self.body.setMarkdown(text)
 
     def set_error(self, message: str):
+        self.stop_loading()
         self.body.setPlainText(f"⚠ {message}")
 
 
