@@ -701,7 +701,8 @@ class LogViewerDialog(QDialog):
         self.explain_btn.setText("✨  Thinking…")
 
         worker = ai_assist.AIExplainWorker(
-            provider, api_key, self._pod, self._ns, self._container, log_text
+            provider, api_key, ai_assist.get_model(provider),
+            self._pod, self._ns, self._container, log_text
         )
         worker.done.connect(self._on_explain_done)
         worker.error.connect(self._on_explain_error)

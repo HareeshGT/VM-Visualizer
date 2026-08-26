@@ -166,19 +166,21 @@ class SettingsDialog(QDialog):
 
         desc = QLabel(
             "Used by the ✨ Explain button in pod log/exec views to get an "
-            "AI diagnosis of crashes and errors. Pick a provider and paste "
-            "its API key — each provider's key is stored locally and sent "
-            "only to that provider's own API."
+            "AI diagnosis of crashes and errors. Pick a provider, choose "
+            "(or type) a model, and paste the matching API key — each is "
+            "stored per-provider and sent only to that provider's own API."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
         v.addWidget(desc)
 
-        # Keys are kept per-provider so switching providers in the combo
-        # box doesn't lose whatever key was entered for the others; only
-        # the field for the currently-selected provider is shown at once.
+        # Keys and model choices are kept per-provider so switching
+        # providers in the combo box doesn't lose whatever was entered
+        # for the others; only the current provider's values are shown
+        # at once.
         ai_settings = ai_assist.get_ai_settings()
         self._ai_keys = dict(ai_settings["api_keys"])
+        self._ai_models = dict(ai_settings["models"])
         self._current_provider_id = None
 
         v.addSpacing(4)
@@ -187,6 +189,14 @@ class SettingsDialog(QDialog):
         for pid, info in ai_assist.PROVIDERS.items():
             self.provider_combo.addItem(info["label"], pid)
         v.addWidget(self.provider_combo)
+
+        v.addWidget(QLabel("Model"))
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setToolTip(
+            "Pick a sample or type any other model id this provider supports."
+        )
+        v.addWidget(self.model_combo)
 
         v.addWidget(QLabel("API key"))
         row = QHBoxLayout()
@@ -204,24 +214,38 @@ class SettingsDialog(QDialog):
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         idx = self.provider_combo.findData(ai_settings["provider"])
         # setCurrentIndex fires currentIndexChanged, which populates the
-        # key field for whichever provider ends up selected — including
-        # the idx < 0 fallback (an unrecognized/removed provider id).
+        # model/key fields for whichever provider ends up selected —
+        # including the idx < 0 fallback (an unrecognized/removed provider id).
         self.provider_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
         v.addStretch()
         return w
 
     def _on_provider_changed(self, _index):
-        # Stash whatever's currently typed under the provider we're
-        # leaving, then load the field with the key already saved (if any)
-        # for the newly-selected one.
+        # Stash whatever's currently entered under the provider we're
+        # leaving, then load the fields with what's already saved (or the
+        # provider's default model) for the newly-selected one.
         if self._current_provider_id is not None:
             self._ai_keys[self._current_provider_id] = self.api_key_edit.text()
+            self._ai_models[self._current_provider_id] = self.model_combo.currentText()
 
         pid = self.provider_combo.currentData()
+        info = ai_assist.PROVIDERS[pid]
         self._current_provider_id = pid
+
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(info["model_samples"])
+        current_model = self._ai_models.get(pid) or info["default_model"]
+        model_idx = self.model_combo.findText(current_model)
+        if model_idx >= 0:
+            self.model_combo.setCurrentIndex(model_idx)
+        else:
+            self.model_combo.setEditText(current_model)
+        self.model_combo.blockSignals(False)
+
         self.api_key_edit.setText(self._ai_keys.get(pid, ""))
-        self.api_key_edit.setPlaceholderText(ai_assist.PROVIDERS[pid]["key_placeholder"])
+        self.api_key_edit.setPlaceholderText(info["key_placeholder"])
 
     def _on_toggle_show_key(self, checked):
         self.api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
@@ -249,7 +273,10 @@ class SettingsDialog(QDialog):
 
         # AI
         self._ai_keys[self._current_provider_id] = self.api_key_edit.text()
-        ai_assist.save_ai_settings(self.provider_combo.currentData(), self._ai_keys)
+        self._ai_models[self._current_provider_id] = self.model_combo.currentText()
+        ai_assist.save_ai_settings(
+            self.provider_combo.currentData(), self._ai_keys, self._ai_models
+        )
 
         self.accept()
 
