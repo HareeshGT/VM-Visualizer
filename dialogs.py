@@ -499,6 +499,16 @@ class AIExplainDialog(QDialog):
             f"background: {T['BG_ITEM']}; color: {T['TEXT_PRIMARY']}; "
             f"border: 1px solid {T['BORDER']}; border-radius: 6px; padding: 10px;"
         )
+        # The widget stylesheet above only covers the QTextBrowser chrome
+        # (background/border/padding) — it doesn't reach the rendered
+        # Markdown content inside. This is the document's own CSS, and is
+        # what actually gives the ### section headings breathing room
+        # above/below instead of butting straight up against the
+        # paragraph before them.
+        self.body.document().setDefaultStyleSheet(
+            "h1, h2, h3 { margin-top: 14px; margin-bottom: 6px; }"
+            "p, ul, ol { margin-top: 4px; margin-bottom: 4px; }"
+        )
         layout.addWidget(self.body, 1)
 
         btn_row = QHBoxLayout()

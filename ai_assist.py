@@ -50,7 +50,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from themes import load_settings, save_settings
 
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 # How much of the tail of the log/event text to send. Keeps requests fast
 # and cheap — a crash-looping pod's most recent output is almost always
@@ -141,9 +141,9 @@ def _gemini_request(prompt, api_key, model):
         "generationConfig": {
             "maxOutputTokens": MAX_TOKENS,
             # Gemini 3.x thinks by default (medium) even for simple
-            # prompts; "low" leaves far more of the cap for the visible
-            # answer instead of invisible reasoning tokens.
-            "thinkingConfig": {"thinkingLevel": "low"},
+            # prompts; "minimal" leaves the most of the cap for the
+            # visible answer instead of invisible reasoning tokens.
+            "thinkingConfig": {"thinkingLevel": "minimal"},
         },
     }).encode("utf-8")
     return url, headers, body
@@ -179,10 +179,12 @@ def _openai_request(prompt, api_key, model):
         # "max_completion_tokens" instead — and that cap covers both
         # invisible reasoning tokens and the visible answer.
         "max_completion_tokens": MAX_TOKENS,
-        # Keep reasoning light so the budget above goes mostly toward the
-        # actual answer rather than internal deliberation. Ignored by
-        # non-reasoning models.
-        "reasoning_effort": "low",
+        # Keep reasoning to a minimum so the budget above goes almost
+        # entirely toward the actual answer rather than internal
+        # deliberation — this is a short, structured diagnosis, not a
+        # task that benefits from deep planning. Ignored by non-reasoning
+        # models.
+        "reasoning_effort": "minimal",
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
     return url, headers, body
@@ -328,7 +330,9 @@ def _build_prompt(pod: str, namespace: str, container: str, log_text: str) -> st
         f"Log output:\n```\n{log_text}\n```\n\n"
         f"Reply concisely in three short sections:\n"
         f"1. **Likely cause** — one or two sentences.\n"
+        f"\n"
         f"2. **Evidence** — the specific line(s) that point to it.\n"
+        f"\n"
         f"3. **Suggested fix** — concrete next step(s), including a "
         f"kubectl command to investigate further if useful.\n\n"
         f"If the log doesn't show an obvious problem, say so plainly "
