@@ -30,6 +30,31 @@ def _alpha(hex_color: str, opacity: float) -> str:
     return f"rgba({r},{g},{b},{opacity})"
 
 
+def _mix(hex_a: str, hex_b: str, t: float) -> str:
+    """Blend two solid hex colors into another solid (fully opaque) hex
+    color — t=0 -> hex_a, t=1 -> hex_b.
+
+    Used for the lock card's own background instead of _alpha(). This
+    dialog is a frameless, WA_TranslucentBackground top-level window, so
+    any genuinely translucent (alpha < 1) area of the card composites
+    against whatever is on screen *behind the whole window* — i.e. the
+    app's own main window — rather than fading into a solid backdrop.
+    That's what previously let "Connect to an instance…" bleed straight
+    through the top of the lock card. _alpha() is still fine for accents
+    painted on top of an already-opaque surface (e.g. the icon ring, or a
+    focus tint inside the pill field); it must never be used for a
+    surface that's meant to fully hide what's behind the dialog.
+    """
+    a = hex_a.lstrip("#")
+    b = hex_b.lstrip("#")
+    ar, ag, ab = (int(a[i:i + 2], 16) for i in (0, 2, 4))
+    br, bg, bb = (int(b[i:i + 2], 16) for i in (0, 2, 4))
+    r = round(ar + (br - ar) * t)
+    g = round(ag + (bg - ag) * t)
+    bch = round(ab + (bb - ab) * t)
+    return f"#{r:02x}{g:02x}{bch:02x}"
+
+
 def _soft_shadow(widget, blur=40, y=10, alpha=140):
     shadow = QGraphicsDropShadowEffect(widget)
     shadow.setBlurRadius(blur)
@@ -49,6 +74,13 @@ class _PillField(QWidget):
     def __init__(self, glyph, placeholder, parent=None):
         super().__init__(parent)
         self.setObjectName("pillField")
+        # Plain QWidget subclasses don't paint stylesheet background/border
+        # on their own — Qt only does that automatically for widgets like
+        # QFrame/QLabel/QPushButton, or any QWidget with this attribute set.
+        # Without it, this pill silently rendered with NO visible box at
+        # all (just floating placeholder text) even though _apply_style()
+        # below was setting a perfectly valid background/border QSS.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._focused = False
 
         row = QHBoxLayout(self)
@@ -74,9 +106,9 @@ class _PillField(QWidget):
                 background: transparent;
                 border: none;
                 color: {T['TEXT_PRIMARY']};
-                font-size: 17px;
+                font-size: 16px;
                 font-weight: 600;
-                letter-spacing: 4px;
+                letter-spacing: 2px;
                 selection-background-color: {T['ACCENT']};
             }}
         """)
@@ -157,18 +189,23 @@ class AppLockDialog(QDialog):
         # ---------------------------------------------------------
         self.card = QWidget(self)
         self.card.setObjectName("lockCard")
+        self.card.setAttribute(Qt.WA_StyledBackground, True)
         self.card.setGeometry(0, 0, self.width(), self.height())
 
+        # Solid (fully opaque) blend from a faint accent tint into the
+        # panel color — deliberately NOT an alpha stop; see _mix()'s
+        # docstring for why real transparency here caused the bleed-through.
+        top_tint = _mix(T['BG_PANEL'], T['ACCENT'], 0.16)
         self.card.setStyleSheet(f"""
             QWidget#lockCard {{
                 background: qlineargradient(
                     x1: 0, y1: 0,
                     x2: 0, y2: 1,
-                    stop: 0 {_alpha(T['ACCENT'], 0.05)},
+                    stop: 0 {top_tint},
                     stop: 0.35 {T['BG_PANEL']},
                     stop: 1 {T['BG_PANEL']}
                 );
-                border: 1px solid {_alpha(T['BORDER'], 0.9)};
+                border: 1px solid {T['BORDER']};
                 border-radius: 26px;
             }}
         """)
@@ -452,6 +489,7 @@ class SetPinDialog(QDialog):
 
         card = QWidget(self)
         card.setObjectName("setPinCard")
+        card.setAttribute(Qt.WA_StyledBackground, True)
         card.setStyleSheet(f"""
             QWidget#setPinCard {{
                 background: {T['BG_PANEL']};
