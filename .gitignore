@@ -3,5 +3,4 @@ build/
 dist/
 EC2 Manager.spec
 .gitignore
-build_app.sh
 tunnel-restart.sh
