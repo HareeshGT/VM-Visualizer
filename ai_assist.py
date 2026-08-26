@@ -39,7 +39,7 @@ touching the worker or the dialog.
 
 The API key is never logged. It's sent only to the selected provider's
 own API host, as a request header in every case (Anthropic's `x-api-key`,
-Google's `x-goog-api-key`, OpenAI's `Authorization: Bearer`).
+Google's `x-goog-api-key`, OpenAI's/DeepSeek's `Authorization: Bearer`).
 """
 
 import json
@@ -89,16 +89,16 @@ MAX_CONTEXT_CHARS = 12_000
 # `detail` in parse_error is the JSON-decoded error body when the API
 # returned one, or the raw response text (str) when it didn't.
 #
-# A number of current models (Gemini 3.x, GPT-5.6) reason internally
-# before writing their visible answer, and those reasoning tokens are
-# billed against the same token cap as the answer itself. With a small
-# cap, how much the model happens to "think" on a given call — which
-# varies request to request — decides how much room is left for the
-# actual answer, so the previous 1000-token cap made responses look
-# truncated at random. Two changes fix that: MAX_TOKENS above is now
-# generous enough to cover both, and each provider that supports it is
-# explicitly told to keep reasoning light for this task (a short,
-# structured diagnosis doesn't need deep reasoning).
+# A number of current models (Gemini 3.x, GPT-5.6, DeepSeek V4) reason
+# internally before writing their visible answer, and those reasoning
+# tokens are billed against the same token cap as the answer itself. With
+# a small cap, how much the model happens to "think" on a given call —
+# which varies request to request — decides how much room is left for
+# the actual answer, so a too-small cap makes responses look truncated
+# at random. Two changes address that: MAX_TOKENS above is generous
+# enough to cover both, and each provider that supports it is explicitly
+# told to keep reasoning light for this task (a short, structured
+# diagnosis doesn't need deep reasoning).
 
 def _anthropic_request(prompt, api_key, model):
     url = "https://api.anthropic.com/v1/messages"
@@ -206,6 +206,40 @@ def _openai_truncated(data):
     return bool(choices) and choices[0].get("finish_reason") == "length"
 
 
+def _deepseek_request(prompt, api_key, model):
+    # DeepSeek's API is OpenAI-compatible (same /chat/completions shape),
+    # just on its own host/model names, and — unlike OpenAI's reasoning
+    # models — still accepts the plain "max_tokens" field even on its
+    # thinking-capable models.
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    body = json.dumps({
+        "model": model,
+        "max_tokens": MAX_TOKENS,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    return url, headers, body
+
+
+def _deepseek_parse(data):
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _deepseek_error(detail, code):
+    return detail.get("error", {}).get("message") if isinstance(detail, dict) else None
+
+
+def _deepseek_truncated(data):
+    choices = data.get("choices") or []
+    return bool(choices) and choices[0].get("finish_reason") == "length"
+
+
 PROVIDERS = {
     "anthropic": {
         "label": "Anthropic (Claude)",
@@ -249,6 +283,22 @@ PROVIDERS = {
             "gpt-5.6-sol",
         ],
         "default_model": "gpt-5.6-terra",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "key_placeholder": "sk-…",
+        "build_request": _deepseek_request,
+        "parse_response": _deepseek_parse,
+        "parse_error": _deepseek_error,
+        "was_truncated": _deepseek_truncated,
+        # Fast/cheap → larger flagship. (The old deepseek-chat /
+        # deepseek-reasoner aliases were retired in July 2026 in favor of
+        # explicit V4 model names.)
+        "model_samples": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ],
+        "default_model": "deepseek-v4-flash",
     },
 }
 
