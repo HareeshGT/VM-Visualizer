@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QListWidget, QListWidgetItem, QTextEdit,
     QSplitter, QFrame, QSpinBox, QHeaderView, QAbstractItemView,
     QDialog, QVBoxLayout as _QVL, QDialogButtonBox, QMessageBox,
-    QMenu, QInputDialog, QApplication,
+    QMenu, QInputDialog, QApplication, QButtonGroup,
 )
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QProcess, QSize
@@ -72,6 +72,10 @@ class KubernetesTab(QWidget):
         self._tunnel_services = []
         self._tunnel_col_widths = (20, 20)
         self._tunnel_process  = None
+        # "all" | "active" | "inactive" — set by the status-filter toggle
+        # in the Tunnels tab; combined with the text search in
+        # _filter_tunnel_services().
+        self._tunnel_status_filter = "all"
         # Remote CSV path tunnel services are read from/written to — lets
         # each person point this at their own file (e.g. a per-project or
         # per-team convention) instead of being locked to the hardcoded
@@ -1627,13 +1631,43 @@ class KubernetesTab(QWidget):
         lay.addWidget(tb_widget)
         self.tunnel_toolbar = tb_widget
         
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(10, 6, 10, 6)
+        search_row.setSpacing(8)
+
         self.tunnel_search = QLineEdit()
         self.tunnel_search.setPlaceholderText("🔍  Filter services...")
         self.tunnel_search.setClearButtonEnabled(True)
         self.tunnel_search.setMaximumHeight(34)
         self.tunnel_search.textChanged.connect(self._filter_tunnel_services)
+        search_row.addWidget(self.tunnel_search, 1)
 
-        lay.addWidget(self.tunnel_search)
+        # Status toggle — All / Active (🟢) / Inactive (🔴). Mutually
+        # exclusive via QButtonGroup, combined with the text search above
+        # in _filter_tunnel_services() rather than replacing it.
+        self.tunnel_filter_all_btn = self._toolbar_btn(
+            "All", tooltip="Show every service, regardless of status")
+        self.tunnel_filter_active_btn = self._toolbar_btn(
+            "🟢  Active", tooltip="Show only services currently exposed on the VM")
+        self.tunnel_filter_inactive_btn = self._toolbar_btn(
+            "🔴  Inactive", tooltip="Show only services not currently exposed on the VM")
+
+        self._tunnel_filter_keys = {}
+        self.tunnel_filter_group = QButtonGroup(self)
+        self.tunnel_filter_group.setExclusive(True)
+        for btn, key in (
+            (self.tunnel_filter_all_btn, "all"),
+            (self.tunnel_filter_active_btn, "active"),
+            (self.tunnel_filter_inactive_btn, "inactive"),
+        ):
+            btn.setCheckable(True)
+            self.tunnel_filter_group.addButton(btn)
+            self._tunnel_filter_keys[btn] = key
+            search_row.addWidget(btn)
+        self.tunnel_filter_all_btn.setChecked(True)
+        self.tunnel_filter_group.buttonClicked.connect(self._on_tunnel_status_filter_clicked)
+
+        lay.addLayout(search_row)
         # Service checklist
         self.tunnel_list = QListWidget()
         self.tunnel_list.setAlternatingRowColors(True)
@@ -1832,12 +1866,17 @@ class KubernetesTab(QWidget):
         hdr.setFont(header_font)
         hdr.setMinimumHeight(42)
 
-    def _filter_tunnel_services(self, text):
+    def _filter_tunnel_services(self, _text=None):
         """
-        Filter tunnel services by service name, namespace or port.
-        Preserves the checkbox state.
+        Filter tunnel services by service name, namespace or port, AND by
+        the Active/Inactive status toggle. Both conditions must pass for a
+        row to be shown. Preserves the checkbox state.
+
+        `_text` is accepted (and ignored) so this can be connected directly
+        to QLineEdit.textChanged as well as called with no arguments from
+        the status-toggle handler and after a status refresh.
         """
-        text = text.strip().lower()
+        text = self.tunnel_search.text().strip().lower()
 
         for i in range(self.tunnel_list.count()):
             item = self.tunnel_list.item(i)
@@ -1851,8 +1890,22 @@ class KubernetesTab(QWidget):
                 f"{svc['namespace']} "
                 f"{svc['port']}"
             ).lower()
+            text_match = text in searchable
 
-            item.setHidden(text not in searchable)
+            exposed = item.data(self.TUNNEL_STATUS_ROLE)
+            if self._tunnel_status_filter == "active":
+                status_match = exposed is True
+            elif self._tunnel_status_filter == "inactive":
+                status_match = exposed is False
+            else:
+                status_match = True
+
+            item.setHidden(not (text_match and status_match))
+
+    def _on_tunnel_status_filter_clicked(self, btn):
+        self._tunnel_status_filter = self._tunnel_filter_keys.get(btn, "all")
+        self._filter_tunnel_services()
+
     # ── Namespace helpers ─────────────────────────────────────
     def _load_namespaces(self):
         self._run_cmd(
@@ -3279,6 +3332,11 @@ class KubernetesTab(QWidget):
     STATUS_UP      = "🟢"
     STATUS_DOWN    = "🔴"
 
+    # Per-item data role storing the last-known exposed state (True/False),
+    # or None before the first status check completes. Read by
+    # _filter_tunnel_services() to apply the Active/Inactive toggle.
+    TUNNEL_STATUS_ROLE = Qt.UserRole + 1
+
     def _format_tunnel_label(self, svc: dict, glyph: str) -> str:
         max_name, max_ns = self._tunnel_col_widths
         return (
@@ -3369,6 +3427,7 @@ class KubernetesTab(QWidget):
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Unchecked)
                 item.setData(Qt.UserRole, svc)
+                item.setData(self.TUNNEL_STATUS_ROLE, None)
                 item.setFont(font)
                 item.setForeground(QColor(T["TEXT_MUTED"]))
                 item.setToolTip("Checking whether this port is exposed on the VM…")
@@ -3377,6 +3436,7 @@ class KubernetesTab(QWidget):
 
         self.tunnel_list.blockSignals(False)
         self._update_tunnel_cmd_preview()
+        self._filter_tunnel_services()
         self._refresh_tunnel_status()
 
     def _refresh_tunnel_status(self):
@@ -3407,6 +3467,7 @@ class KubernetesTab(QWidget):
             exposed = svc["port"] in listening_ports
             glyph   = self.STATUS_UP if exposed else self.STATUS_DOWN
             item.setText(self._format_tunnel_label(svc, glyph))
+            item.setData(self.TUNNEL_STATUS_ROLE, exposed)
             item.setForeground(QColor(T["SUCCESS"] if exposed else T["DANGER"]))
             item.setToolTip(
                 "Port {} is {} on the VM.".format(
@@ -3414,11 +3475,22 @@ class KubernetesTab(QWidget):
                 )
             )
 
+        # Statuses just changed — re-apply the Active/Inactive toggle (and
+        # the text search) now that they're known, rather than waiting for
+        # the user to touch the search box again.
+        self._filter_tunnel_services()
+
     def _set_all_tunnel_checks(self, checked: bool):
+        """Check/uncheck every currently VISIBLE row — i.e. respects
+        whatever the search box and Active/Inactive toggle are currently
+        hiding, rather than reaching through the filter to rows the user
+        can't see."""
         state = Qt.Checked if checked else Qt.Unchecked
         self.tunnel_list.blockSignals(True)
         for i in range(self.tunnel_list.count()):
             item = self.tunnel_list.item(i)
+            if item.isHidden():
+                continue
             if item.flags() & Qt.ItemIsUserCheckable:
                 item.setCheckState(state)
         self.tunnel_list.blockSignals(False)
