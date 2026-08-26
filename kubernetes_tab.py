@@ -387,7 +387,25 @@ class KubernetesTab(QWidget):
         self.scale_spin.setFixedWidth(70)
         self.scale_spin.setToolTip("Replicas")
         tb.addWidget(QLabel("Replicas:"))
+
+        self.scale_minus_btn = self._toolbar_btn(
+            "−", tooltip="Scale down by 1 replica (applies immediately)")
+        self.scale_minus_btn.setFixedWidth(32)
+        # _toolbar_btn's shared style adds 14px of padding on each side,
+        # which at this button's width left almost nothing for the glyph
+        # itself — override it so "−"/"+" actually render, centered.
+        self.scale_minus_btn.setStyleSheet("padding: 0; font-size: 16px; font-weight: 600;")
+        self.scale_minus_btn.clicked.connect(lambda: self._deploy_scale_step(-1))
+        tb.addWidget(self.scale_minus_btn)
+
         tb.addWidget(self.scale_spin)
+
+        self.scale_plus_btn = self._toolbar_btn(
+            "+", tooltip="Scale up by 1 replica (applies immediately)")
+        self.scale_plus_btn.setFixedWidth(32)
+        self.scale_plus_btn.setStyleSheet("padding: 0; font-size: 16px; font-weight: 600;")
+        self.scale_plus_btn.clicked.connect(lambda: self._deploy_scale_step(1))
+        tb.addWidget(self.scale_plus_btn)
 
         for label, obj, slot in [
             ("⇅  Scale",    "dep_scale_btn",   self._deploy_scale),
@@ -2345,6 +2363,21 @@ class KubernetesTab(QWidget):
                                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             self._run_cmd(f"kubectl scale deployment {dep} -n {ns} --replicas={replicas} 2>&1",
                           lambda o: (self._log(o), self._load_deployments()))
+
+    def _deploy_scale_step(self, delta: int):
+        """Quick +1/-1 scale, applied immediately (no confirmation dialog —
+        this is the fast stepper next to the Replicas spinbox, distinct
+        from the "⇅ Scale" button which jumps straight to whatever number
+        is typed into the spinbox). Keeps the spinbox in sync so both
+        controls always agree on the current target."""
+        dep, ns = self._selected_deploy()
+        if not dep:
+            return
+        replicas = max(self.scale_spin.minimum(),
+                       min(self.scale_spin.maximum(), self.scale_spin.value() + delta))
+        self.scale_spin.setValue(replicas)
+        self._run_cmd(f"kubectl scale deployment {dep} -n {ns} --replicas={replicas} 2>&1",
+                      lambda o: (self._log(o), self._load_deployments()))
 
     def _deploy_restart(self):
         dep, ns = self._selected_deploy()
