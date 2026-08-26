@@ -597,7 +597,7 @@ class LogViewerDialog(QDialog):
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log_view.toPlainText()))
         ctrl.addWidget(copy_btn)
 
-        self.explain_btn = QPushButton("✨  Explain")
+        self.explain_btn = QPushButton("✨  Analyze with AI")
         self.explain_btn.setToolTip("Ask AI to diagnose this log output")
         self.explain_btn.clicked.connect(self._on_explain)
         ctrl.addWidget(self.explain_btn)
@@ -731,7 +731,7 @@ class LogViewerDialog(QDialog):
     def _on_explain_finished(self):
         self._ai_worker = None
         self.explain_btn.setEnabled(True)
-        self.explain_btn.setText("✨  Explain")
+        self.explain_btn.setText("✨  Analyze with AI")
 
     def closeEvent(self, event):
         # Stop the SSH channel/thread rather than leaking it once the dialog closes.
