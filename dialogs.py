@@ -893,6 +893,18 @@ class ExecDialog(QDialog):
         self._cwd       = None
         self._workers   = []
 
+        # State for the "Explain error" AI feature — the last command run
+        # (not counting `cd`, which has its own distinct failure message
+        # already) plus its exit code and raw stdout/stderr, so a click on
+        # the button doesn't need to re-derive any of that from the
+        # combined text already sitting in self.output.
+        self._last_cmd        = None
+        self._last_exit_code  = None
+        self._last_stdout     = ""
+        self._last_stderr     = ""
+        self._ai_worker       = None
+        self._ai_dialog       = None
+
         self.setWindowTitle(f"Exec — {pod}")
         self.resize(860, 500)
         apply_qss_to(self)
@@ -921,6 +933,12 @@ class ExecDialog(QDialog):
         run_btn.setObjectName("primary")
         run_btn.clicked.connect(self._run)
         inp_row.addWidget(run_btn)
+
+        self.explain_btn = QPushButton("✨  Explain error")
+        self.explain_btn.setToolTip("Ask AI to diagnose the last failed command")
+        self.explain_btn.setEnabled(False)
+        self.explain_btn.clicked.connect(self._on_explain)
+        inp_row.addWidget(self.explain_btn)
         layout.addLayout(inp_row)
 
         bb = QDialogButtonBox(QDialogButtonBox.Close)
@@ -958,11 +976,75 @@ class ExecDialog(QDialog):
         full = f"kubectl exec -n {self._ns} {self._pod} {c} -- sh -c '{safe_cmd}' 2>&1"
         append_terminal_html(self.output, f"\n<span style='color:{T['ACCENT2']}'>$ {html_escape(cmd)}</span>")
         worker = CommandWorker(self.ssh, full)
+        worker.result.connect(lambda out, err, code, cmd=cmd: self._on_cmd_result(cmd, out, err, code))
         worker.done.connect(lambda r: append_terminal_text(self.output, r))
         worker.error.connect(lambda e: append_terminal_html(self.output, f"<span style='color:{T['DANGER']}'>[error] {html_escape(e)}</span>"))
         track_worker(self._workers, worker)
         worker.start()
         self.cmd_inp.clear()
+
+    def _on_cmd_result(self, cmd: str, out: str, err: str, exit_code: int):
+        """Remembers the last command's real exit code/stdout/stderr (the
+        `2>&1` baked into `full` above means `err` from CommandWorker
+        itself is usually empty — the actual error text lives in `out` —
+        so the Explain button/prompt fall back to `out` when `err` is
+        blank; see ai_assist._build_command_prompt)."""
+        self._last_cmd       = cmd
+        self._last_stdout    = out
+        self._last_stderr    = err
+        self._last_exit_code = exit_code
+        failed = exit_code != 0 or bool((err or "").strip())
+        self.explain_btn.setEnabled(failed)
+
+    # ── AI diagnosis of the last failed command ────────────────
+    def _on_explain(self):
+        if self._ai_worker is not None or self._last_cmd is None:
+            return  # already running, or nothing to explain yet
+
+        provider = ai_assist.get_provider()
+        api_key = ai_assist.get_api_key(provider)
+        if not api_key:
+            label = ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
+            QMessageBox.information(
+                self, "No API key set",
+                f"Add a {label} API key in Settings → 🤖 AI to use this feature."
+            )
+            return
+
+        self._ai_dialog = AIExplainDialog(self, f"AI diagnosis — {self._last_cmd}")
+        self._ai_dialog.set_loading()
+        self._ai_dialog.show()
+
+        self.explain_btn.setEnabled(False)
+        self.explain_btn.setText("✨  Thinking…")
+
+        worker = ai_assist.AICommandExplainWorker(
+            provider, api_key, ai_assist.get_model(provider),
+            self._last_cmd, self._last_exit_code, self._last_stderr, self._last_stdout,
+        )
+        worker.done.connect(self._on_explain_done)
+        worker.error.connect(self._on_explain_error)
+        worker.finished.connect(self._on_explain_finished)
+        self._ai_worker = worker
+        worker.start()
+
+    def _on_explain_done(self, text: str):
+        if self._ai_dialog is not None:
+            self._ai_dialog.set_markdown(text)
+
+    def _on_explain_error(self, message: str):
+        if self._ai_dialog is not None:
+            self._ai_dialog.set_error(message)
+
+    def _on_explain_finished(self):
+        self._ai_worker = None
+        self.explain_btn.setEnabled(True)
+        self.explain_btn.setText("✨  Explain error")
+
+    def closeEvent(self, event):
+        if self._ai_worker is not None:
+            self._ai_worker.quit()
+        super().closeEvent(event)
 
     def _handle_cd_result(self, result: str):
         result = result.strip()

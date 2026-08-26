@@ -26,7 +26,8 @@ from themes import T, THEMES, apply_theme_vars, build_qss, apply_qss_to, save_se
 from utils import classify, icon_for, size_fmt, add_recent_instance, monospace_font
 from sudo_fs import SudoFS
 from workers import CommandWorker, ConnectWorker, ConnectionHealthWorker, track_worker
-from dialogs import ConnectDialog, FileTransferDialog, FileEditorDialog, FileExecDialog, SearchDialog, ConnectingDialog, MediaPlayerDialog
+from dialogs import ConnectDialog, FileTransferDialog, FileEditorDialog, FileExecDialog, SearchDialog, ConnectingDialog, MediaPlayerDialog, AIExplainDialog
+import ai_assist
 from sidebar import Sidebar
 from preview import PreviewPane
 from file_widgets import FileRowWidget, FileGridWidget
@@ -95,6 +96,14 @@ class EC2FileManager(QMainWindow):
         self._conn_pem     = None  # type: Optional[str]
         self._conn_password = None  # type: Optional[str]
         self._terminal_cwd = None  # type: Optional[str]
+        # "Explain error" AI feature state for the plain SSH terminal —
+        # mirrors ExecDialog's equivalent state (see dialogs.py).
+        self._last_term_cmd       = None
+        self._last_term_stdout    = ""
+        self._last_term_stderr    = ""
+        self._last_term_exit_code = None
+        self._term_ai_worker      = None
+        self._term_ai_dialog      = None
         self._theme_fade_anim = None  # keeps the QPropertyAnimation alive while running
         self._pending_conn  = {}
         self._connecting_dlg = None
@@ -357,6 +366,14 @@ class EC2FileManager(QMainWindow):
         self.t_header = QLabel("  Terminal")
         self.t_header.setFixedHeight(28)
         header_row.addWidget(self.t_header, 1)
+
+        self.terminal_explain_btn = QPushButton("✨")
+        self.terminal_explain_btn.setToolTip("Explain the last failed command with AI")
+        self.terminal_explain_btn.setFixedSize(28, 28)
+        self.terminal_explain_btn.setStyleSheet("padding: 0px;")
+        self.terminal_explain_btn.setEnabled(False)
+        self.terminal_explain_btn.clicked.connect(self._on_terminal_explain)
+        header_row.addWidget(self.terminal_explain_btn)
 
         self.terminal_popout_btn = QPushButton("⤢")
         self.terminal_popout_btn.setToolTip("Open terminal in its own window")
@@ -1413,10 +1430,67 @@ class EC2FileManager(QMainWindow):
         self.progress.show()
 
         worker = CommandWorker(self.ssh, cmd, cwd=self._terminal_cwd, sudo_user=self._sudo_user)
+        worker.result.connect(lambda out, err, code, cmd=cmd: self._on_terminal_result(cmd, out, err, code))
         worker.done.connect(lambda out: self._cmd_done(out, cmd))
         worker.error.connect(lambda e: self._cmd_done("[error] {}".format(e), cmd))
         track_worker(self._workers, worker)
         worker.start()
+
+    def _on_terminal_result(self, cmd, out, err, exit_code):
+        """Remembers the last terminal command's real exit code/stdout/
+        stderr for the ✨ Explain button — see ExecDialog._on_cmd_result
+        in dialogs.py for the equivalent in the kubectl-exec terminal."""
+        self._last_term_cmd       = cmd
+        self._last_term_stdout    = out
+        self._last_term_stderr    = err
+        self._last_term_exit_code = exit_code
+        failed = exit_code != 0 or bool((err or "").strip())
+        self.terminal_explain_btn.setEnabled(failed)
+
+    # ── AI diagnosis of the last failed terminal command ────────
+    def _on_terminal_explain(self):
+        if self._term_ai_worker is not None or self._last_term_cmd is None:
+            return  # already running, or nothing to explain yet
+
+        provider = ai_assist.get_provider()
+        api_key = ai_assist.get_api_key(provider)
+        if not api_key:
+            label = ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
+            QMessageBox.information(
+                self, "No API key set",
+                f"Add a {label} API key in Settings → 🤖 AI to use this feature."
+            )
+            return
+
+        self._term_ai_dialog = AIExplainDialog(self, f"AI diagnosis — {self._last_term_cmd}")
+        self._term_ai_dialog.set_loading()
+        self._term_ai_dialog.show()
+
+        self.terminal_explain_btn.setEnabled(False)
+
+        worker = ai_assist.AICommandExplainWorker(
+            provider, api_key, ai_assist.get_model(provider),
+            self._last_term_cmd, self._last_term_exit_code,
+            self._last_term_stderr, self._last_term_stdout,
+        )
+        worker.done.connect(self._on_terminal_explain_done)
+        worker.error.connect(self._on_terminal_explain_error)
+        worker.finished.connect(self._on_terminal_explain_finished)
+        self._term_ai_worker = worker
+        worker.start()
+
+    def _on_terminal_explain_done(self, text):
+        if self._term_ai_dialog is not None:
+            self._term_ai_dialog.set_markdown(text)
+
+    def _on_terminal_explain_error(self, message):
+        if self._term_ai_dialog is not None:
+            self._term_ai_dialog.set_error(message)
+
+    def _on_terminal_explain_finished(self):
+        self._term_ai_worker = None
+        failed = (self._last_term_exit_code not in (0, None)) or bool((self._last_term_stderr or "").strip())
+        self.terminal_explain_btn.setEnabled(failed)
 
     def _on_terminal_interrupt(self):
         # Commands here run one-shot over SSH exec_command (not a live PTY
@@ -1664,6 +1738,8 @@ class EC2FileManager(QMainWindow):
         try:
             if self._terminal_popout_win is not None:
                 self._terminal_popout_win.close()
+            if self._term_ai_worker is not None:
+                self._term_ai_worker.quit()
             self.k8s_tab.clear_connection_info()  # also stops any active tunnel
             self.dashboard_tab.set_active(False)  # stop the dashboard's polling timer
             if self.sftp: self.sftp.close()

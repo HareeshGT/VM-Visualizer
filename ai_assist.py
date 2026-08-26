@@ -390,7 +390,110 @@ def _build_prompt(pod: str, namespace: str, container: str, log_text: str) -> st
     )
 
 
-# ─── Background worker ──────────────────────────────────────────
+def _build_command_prompt(command: str, exit_code, stderr_text: str, stdout_text: str = "") -> str:
+    """Same shape as _build_prompt() above, but for a failed shell command
+    (SSH terminal or `kubectl exec`) instead of a Kubernetes pod's logs.
+    stderr is the primary evidence when present; stdout is included too
+    since some commands only ever report the actual error on stdout, and
+    ExecDialog's own commands run with a shell-level `2>&1` that merges
+    everything into stdout before this ever sees it."""
+    stderr_text = (stderr_text or "").strip()
+    stdout_text = (stdout_text or "").strip()
+
+    if stderr_text and stdout_text:
+        output = f"(stderr)\n{stderr_text}\n\n(stdout)\n{stdout_text}"
+    else:
+        output = stderr_text or stdout_text or "(no output captured)"
+
+    if len(output) > MAX_CONTEXT_CHARS:
+        # Keep the tail — the most recent output is what's most likely to
+        # contain the actual error for a long-running command.
+        output = "…(truncated)…\n" + output[-MAX_CONTEXT_CHARS:]
+
+    exit_str = str(exit_code) if exit_code is not None else "unknown"
+
+    return (
+        f"You are helping a DevOps engineer diagnose a failed shell command "
+        f"run over SSH.\n\n"
+        f"Command:\n```\n{command}\n```\n\n"
+        f"Exit code: {exit_str}\n\n"
+        f"Output:\n```\n{output}\n```\n\n"
+        f"Reply concisely in three short sections:\n"
+        f"1. **Likely cause** — one or two sentences.\n"
+        f"\n"
+        f"2. **Evidence** — the specific line(s) that point to it.\n"
+        f"\n"
+        f"3. **Suggested fix** — concrete next step(s), including a "
+        f"corrected command if the issue is with the command itself.\n\n"
+        f"If the output doesn't show an obvious problem, say so plainly "
+        f"instead of guessing."
+    )
+
+
+# ─── Shared provider call ────────────────────────────────────────
+def _call_provider(provider_id: str, api_key: str, model: str, prompt: str):
+    """Sends `prompt` to the given provider/model and returns (text, None)
+    on success or (None, error_message) on failure. Shared by every
+    *ExplainWorker so the HTTP/parsing/truncation handling — which has
+    nothing to do with what the prompt is about — lives in exactly one
+    place."""
+    provider = PROVIDERS.get(provider_id)
+    if provider is None:
+        return None, f"Unknown AI provider: {provider_id!r}"
+    if not api_key:
+        return None, f"No {provider['label']} API key set. Add one in Settings → 🤖 AI."
+
+    model = model or provider["default_model"]
+    url, headers, body = provider["build_request"](prompt, api_key, model)
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(raw)
+        except Exception:
+            detail = raw
+        msg = provider["parse_error"](detail, e.code) or (raw.strip() or str(e))
+        return None, f"API error ({e.code}): {msg}"
+    except urllib.error.URLError as e:
+        return None, f"Network error: {e.reason}"
+    except Exception as e:
+        return None, f"Unexpected error: {e}"
+
+    try:
+        text = provider["parse_response"](data)
+    except Exception:
+        text = ""
+
+    truncated = False
+    try:
+        truncated = provider["was_truncated"](data)
+    except Exception:
+        pass
+
+    if not text:
+        if truncated:
+            return None, (
+                "The model used its whole token budget on internal "
+                "reasoning and never got to an answer. Try a lower-"
+                "reasoning model (e.g. a Flash/mini/Luna variant) in "
+                "Settings → 🤖 AI, or a shorter excerpt."
+            )
+        return None, "Empty response from the API."
+
+    if truncated:
+        text += (
+            "\n\n*(⚠ Response was cut off by the model's token limit — "
+            "the diagnosis above may be incomplete.)*"
+        )
+
+    return text, None
+
+
+# ─── Background workers ──────────────────────────────────────────
 class AIExplainWorker(QThread):
     """Sends pod log/event text to the selected provider's API and returns
     a plain-English diagnosis. Mirrors workers.CommandWorker's done/error
@@ -414,71 +517,50 @@ class AIExplainWorker(QThread):
         self.finished.connect(self.deleteLater)
 
     def run(self):
-        provider = PROVIDERS.get(self._provider)
-        if provider is None:
-            self.error.emit(f"Unknown AI provider: {self._provider!r}")
-            return
-        if not self._api_key:
-            self.error.emit(
-                f"No {provider['label']} API key set. Add one in Settings → 🤖 AI."
-            )
-            return
         if not (self._log_text or "").strip():
             self.error.emit("Nothing to analyze — the log is empty.")
             return
 
-        model = self._model or provider["default_model"]
         prompt = _build_prompt(self._pod, self._namespace, self._container, self._log_text)
-        url, headers, body = provider["build_request"](prompt, self._api_key, model)
+        text, err = _call_provider(self._provider, self._api_key, self._model, prompt)
+        if err:
+            self.error.emit(err)
+        else:
+            self.done.emit(text)
 
-        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
 
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", errors="replace")
-            try:
-                detail = json.loads(raw)
-            except Exception:
-                detail = raw
-            msg = provider["parse_error"](detail, e.code) or (raw.strip() or str(e))
-            self.error.emit(f"API error ({e.code}): {msg}")
-            return
-        except urllib.error.URLError as e:
-            self.error.emit(f"Network error: {e.reason}")
-            return
-        except Exception as e:
-            self.error.emit(f"Unexpected error: {e}")
-            return
+class AICommandExplainWorker(QThread):
+    """Sends a failed shell command's exit code + stderr/stdout (SSH
+    terminal or `kubectl exec` in ExecDialog — NOT a pod's logs) to the
+    selected provider's API and returns a plain-English diagnosis. Same
+    done/error signal shape as AIExplainWorker/CommandWorker so call sites
+    reuse identical progress-spinner/button-state wiring."""
 
-        try:
-            text = provider["parse_response"](data)
-        except Exception:
-            text = ""
+    done  = pyqtSignal(str)
+    error = pyqtSignal(str)
 
-        truncated = False
-        try:
-            truncated = provider["was_truncated"](data)
-        except Exception:
-            pass
+    def __init__(self, provider: str, api_key: str, model: str, command: str,
+                 exit_code, stderr_text: str, stdout_text: str = "", parent=None):
+        super().__init__(parent)
+        self._provider    = provider
+        self._api_key     = api_key
+        self._model       = model
+        self._command     = command
+        self._exit_code   = exit_code
+        self._stderr_text = stderr_text
+        self._stdout_text = stdout_text
+        self.finished.connect(self.deleteLater)
 
-        if not text:
-            if truncated:
-                self.error.emit(
-                    "The model used its whole token budget on internal "
-                    "reasoning and never got to an answer. Try a lower-"
-                    "reasoning model (e.g. a Flash/mini/Luna variant) in "
-                    "Settings → 🤖 AI, or a shorter log excerpt."
-                )
-            else:
-                self.error.emit("Empty response from the API.")
+    def run(self):
+        if not (self._stderr_text or self._stdout_text or "").strip():
+            self.error.emit("Nothing to analyze — the command produced no output.")
             return
 
-        if truncated:
-            text += (
-                "\n\n*(⚠ Response was cut off by the model's token limit — "
-                "the diagnosis above may be incomplete.)*"
-            )
-
-        self.done.emit(text)
+        prompt = _build_command_prompt(
+            self._command, self._exit_code, self._stderr_text, self._stdout_text
+        )
+        text, err = _call_provider(self._provider, self._api_key, self._model, prompt)
+        if err:
+            self.error.emit(err)
+        else:
+            self.done.emit(text)

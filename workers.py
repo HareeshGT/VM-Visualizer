@@ -223,6 +223,14 @@ class CommandWorker(QThread):
 
     done  = pyqtSignal(str)
     error = pyqtSignal(str)
+    # Emitted alongside `done` (never instead of it) whenever the remote
+    # command actually completes — the raw stdout, raw stderr, and the
+    # real exit status of self.cmd, kept separate rather than merged into
+    # one string. `done` keeps emitting exactly the same combined text it
+    # always has, so every existing call site is unaffected; only callers
+    # that need genuine pass/fail state (e.g. the terminal/ExecDialog
+    # "Explain this error" AI feature) need to connect to this instead.
+    result = pyqtSignal(str, str, int)
 
     # Safety net: exec_command's stdout only closes once the remote command
     # actually exits. A script that runs something long-lived in the
@@ -286,6 +294,16 @@ class CommandWorker(QThread):
                     "(raw error: {})".format(self.timeout, self.cmd, read_err)
                 )
                 return
+            # recv_exit_status() reflects self.cmd's own exit status even
+            # through the "export PATH=...; cd ...; <self.cmd>" and/or
+            # "sudo -u user sh -c '...'" wrapping above, since self.cmd is
+            # always the last command in the ';'-joined chain and a
+            # shell's own exit status is that of its last command.
+            try:
+                exit_code = stdout.channel.recv_exit_status()
+            except Exception:
+                exit_code = -1
+            self.result.emit(out, err, exit_code)
             self.done.emit(out + ("\n[stderr]\n{}".format(err) if err else ""))
         except Exception as e:
             self.error.emit(str(e))
