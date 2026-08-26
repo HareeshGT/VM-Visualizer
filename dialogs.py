@@ -524,30 +524,115 @@ class AIExplainDialog(QDialog):
 
         layout.addLayout(btn_row)
 
-        # Loading animation
+        # ─────────────────────────────────────────────
+        # Thinking animation
+        # ─────────────────────────────────────────────
+
         self._loading_timer = QTimer(self)
         self._loading_timer.timeout.connect(self._update_loading_text)
         self._loading_dots = 0
 
+        # ─────────────────────────────────────────────
+        # Response typing animation
+        # ─────────────────────────────────────────────
+
+        self._typing_timer = QTimer(self)
+        self._typing_timer.timeout.connect(self._type_next_chunk)
+
+        self._response_text = ""
+        self._typed_position = 0
+
+    # ─────────────────────────────────────────────────
+    # Thinking animation
+    # ─────────────────────────────────────────────────
+
     def set_loading(self):
+        # Stop anything that might still be running
+        self._typing_timer.stop()
+        self._loading_timer.stop()
+
         self._loading_dots = 0
+
         self.body.setPlainText("Thinking")
         self._loading_timer.start(400)
 
     def _update_loading_text(self):
         self._loading_dots = (self._loading_dots + 1) % 4
+
         dots = "." * self._loading_dots
+
         self.body.setPlainText(f"Thinking{dots}")
 
     def stop_loading(self):
         self._loading_timer.stop()
 
+    # ─────────────────────────────────────────────────
+    # AI response typing effect
+    # ─────────────────────────────────────────────────
+
     def set_markdown(self, text: str):
+        # Stop "Thinking..."
         self.stop_loading()
-        self.body.setMarkdown(text)
+
+        # Store the complete response
+        self._response_text = text or ""
+        self._typed_position = 0
+
+        # Clear previous response
+        self.body.clear()
+
+        if not self._response_text:
+            return
+
+        # Start typing
+        #
+        # 20ms = fairly fast
+        # 30ms = ChatGPT-like
+        # 40ms = slower
+        #
+        self._typing_timer.start(25)
+
+    def _type_next_chunk(self):
+        if self._typed_position >= len(self._response_text):
+            self._typing_timer.stop()
+
+            # Render the final response as Markdown once typing is complete.
+            self.body.setMarkdown(self._response_text)
+
+            return
+
+        # Type several characters per tick.
+        #
+        # This makes the animation smooth without creating
+        # thousands of UI updates for a long response.
+        chunk_size = 3
+
+        next_position = min(
+            self._typed_position + chunk_size,
+            len(self._response_text)
+        )
+
+        visible_text = self._response_text[:next_position]
+
+        self.body.setPlainText(visible_text)
+
+        self._typed_position = next_position
+
+        # Keep the view scrolled to the bottom while typing.
+        scrollbar = self.body.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    # ─────────────────────────────────────────────────
+    # Error
+    # ─────────────────────────────────────────────────
 
     def set_error(self, message: str):
         self.stop_loading()
+        self._typing_timer.stop()
+
+        self._response_text = ""
+        self._typed_position = 0
+
         self.body.setPlainText(f"⚠ {message}")
 
 
