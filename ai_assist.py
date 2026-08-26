@@ -50,7 +50,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from themes import load_settings, save_settings
 
-MAX_TOKENS = 8192
+MAX_TOKENS = 4096
 
 # How much of the tail of the log/event text to send. Keeps requests fast
 # and cheap — a crash-looping pod's most recent output is almost always
