@@ -21,7 +21,11 @@ from PyQt5.QtWidgets import QCompleter
 
 from themes import T, apply_qss_to, load_settings, save_settings
 from workers import CommandWorker, track_worker
-from dialogs import LogViewerDialog, ExecDialog, ManageTunnelServicesDialog, ContainerPickerDialog
+from dialogs import (
+    LogViewerDialog, ExecDialog, ManageTunnelServicesDialog,
+    ContainerPickerDialog, AIExplainDialog,
+)
+import ai_assist
 from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
@@ -58,6 +62,15 @@ class KubernetesTab(QWidget):
         self._namespaces  = []
         self._namespaces_pending_select = None
         self._workers     = []
+        # Inline "✨ AI" button on pod cards (see _on_pod_card_ai_requested):
+        # single-flight state so a second click (on any card) while a
+        # diagnosis is already running for one pod just no-ops rather than
+        # overlapping requests / dialogs.
+        self._pod_ai_pod        = None   # name of the pod currently being diagnosed, if any
+        self._pod_ai_card       = None   # the PodCardWidget that started it, so its button can be re-enabled
+        self._pod_ai_log_worker = None
+        self._pod_ai_worker     = None
+        self._pod_ai_dialog     = None
         self._events_raw  = ""
         self._events_warnings_only = False
         self._auto_refresh_timer = QTimer(self)
@@ -2140,7 +2153,15 @@ class KubernetesTab(QWidget):
             item.setData(Qt.UserRole, meta)
             item.setSizeHint(QSize(0, PodCardWidget.CARD_HEIGHT))
             self.pod_list.addItem(item)
-            self.pod_list.setItemWidget(item, PodCardWidget(meta, all_ns))
+            card = PodCardWidget(meta, all_ns)
+            card.ai_requested.connect(self._on_pod_card_ai_requested)
+            self.pod_list.setItemWidget(item, card)
+            if meta.get("name") == self._pod_ai_pod:
+                # A refresh landed while this pod's diagnosis was still in
+                # flight — the old card (and its "✨ …" busy state) just got
+                # thrown away, so re-point the busy state at its replacement.
+                self._pod_ai_card = card
+                card.set_ai_busy(True)
             total += 1
             if "running" in status.lower():
                 running += 1
@@ -2199,6 +2220,103 @@ class KubernetesTab(QWidget):
         pod, ns = self._selected_pod()
         if pod:
             LogViewerDialog(self, self.ssh, ns, pod).exec_()
+
+    # ── Inline "✨ AI" button on troubled pod cards ─────────────
+    # Same diagnosis flow as LogViewerDialog's "Analyze with AI" button
+    # (fetch logs -> ai_assist.AIExplainWorker -> AIExplainDialog), just
+    # entered straight from the card instead of requiring the user to open
+    # the full log viewer first. Single-flight: only one card's request
+    # runs at a time (see the self._pod_ai_* state in __init__).
+    def _on_pod_card_ai_requested(self, meta: dict):
+        if self._pod_ai_pod is not None:
+            return  # a diagnosis is already running — button is disabled meanwhile, but be defensive
+
+        if not self.ssh:
+            QMessageBox.warning(self, "Not connected", "Connect to the instance first.")
+            return
+
+        provider = ai_assist.get_provider()
+        api_key  = ai_assist.get_api_key(provider)
+        if not api_key:
+            label = ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
+            QMessageBox.information(
+                self, "No API key set",
+                f"Add a {label} API key in Settings → 🤖 AI to use this feature."
+            )
+            return
+
+        pod    = meta.get("name")
+        ns     = meta.get("namespace") or "default"
+        status = meta.get("status", "") or ""
+
+        self._pod_ai_pod  = pod
+        self._pod_ai_card = self.sender() if isinstance(self.sender(), PodCardWidget) else None
+        if self._pod_ai_card is not None:
+            self._pod_ai_card.set_ai_busy(True)
+
+        self._pod_ai_dialog = AIExplainDialog(self, f"AI diagnosis — {pod}")
+        self._pod_ai_dialog.body.setPlainText("Fetching logs…")
+        self._pod_ai_dialog.show()
+
+        # A pod that's actively crash-looping usually has nothing useful in
+        # its *current* container's logs (it just restarted) — the actual
+        # error is in the previous container's log instead. A pod with
+        # restarts>0 but currently Running already fell back to this same
+        # heuristic on the card itself (see k8s_cards._pod_in_trouble), so
+        # mirror it here rather than re-deriving it from restarts alone.
+        use_previous = "crash" in status.lower()
+        prev = "--previous" if use_previous else ""
+        inner = f"kubectl logs --tail=200 -n {ns} {prev} {pod} 2>&1"
+        cmd = f"bash -lc {shlex.quote(inner)}"
+
+        worker = CommandWorker(self.ssh, cmd)
+        worker.done.connect(lambda out, pod=pod, ns=ns: self._on_pod_ai_logs_fetched(pod, ns, out))
+        worker.error.connect(lambda err: self._on_pod_ai_logs_error(err))
+        self._pod_ai_log_worker = worker
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _on_pod_ai_logs_fetched(self, pod: str, ns: str, log_text: str):
+        self._pod_ai_log_worker = None
+        log_text = (log_text or "").strip()
+        if not log_text:
+            self._on_pod_ai_logs_error("No log output for this pod.")
+            return
+
+        if self._pod_ai_dialog is not None:
+            self._pod_ai_dialog.set_loading()
+
+        provider = ai_assist.get_provider()
+        worker = ai_assist.AIExplainWorker(
+            provider, ai_assist.get_api_key(provider), ai_assist.get_model(provider),
+            pod, ns, None, log_text,
+        )
+        worker.done.connect(self._on_pod_ai_done)
+        worker.error.connect(self._on_pod_ai_error)
+        worker.finished.connect(self._on_pod_ai_finished)
+        self._pod_ai_worker = worker
+        worker.start()
+
+    def _on_pod_ai_logs_error(self, message: str):
+        self._pod_ai_log_worker = None
+        if self._pod_ai_dialog is not None:
+            self._pod_ai_dialog.set_error(f"Couldn't fetch logs: {message}")
+        self._on_pod_ai_finished()
+
+    def _on_pod_ai_done(self, text: str):
+        if self._pod_ai_dialog is not None:
+            self._pod_ai_dialog.set_markdown(text)
+
+    def _on_pod_ai_error(self, message: str):
+        if self._pod_ai_dialog is not None:
+            self._pod_ai_dialog.set_error(message)
+
+    def _on_pod_ai_finished(self):
+        self._pod_ai_worker = None
+        self._pod_ai_pod    = None
+        if self._pod_ai_card is not None:
+            self._pod_ai_card.set_ai_busy(False)
+        self._pod_ai_card = None
 
     def _pod_exec(self):
         pod, ns = self._selected_pod()

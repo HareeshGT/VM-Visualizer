@@ -11,8 +11,8 @@ selection changes into set_selected() itself (KubernetesTab does this
 via currentItemChanged).
 """
 
-from PyQt5.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy
-from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy
+from PyQt5.QtCore import Qt, pyqtSignal
 
 from themes import T
 from utils import monospace_font
@@ -59,6 +59,27 @@ def _meta_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
     return lbl
+
+
+def _ai_button(tooltip: str) -> QPushButton:
+    """Small pill-shaped '✨ AI' button used to trigger an inline AI
+    diagnosis directly from a card, without opening the full log viewer
+    first. Shared styling so every card that offers this affordance
+    looks identical."""
+    btn = QPushButton("✨ AI")
+    btn.setToolTip(tooltip)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setFixedHeight(20)
+    accent = T["ACCENT"]
+    btn.setStyleSheet(
+        f"QPushButton {{ background: rgba({_hex_to_rgb(accent)}, 0.15); "
+        f"color: {accent}; border: 1px solid rgba({_hex_to_rgb(accent)}, 0.4); "
+        f"border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 700; }}"
+        f"QPushButton:hover {{ background: rgba({_hex_to_rgb(accent)}, 0.28); }}"
+        f"QPushButton:disabled {{ color: {T['TEXT_MUTED']}; "
+        f"border-color: {T['BORDER']}; background: transparent; }}"
+    )
+    return btn
 
 
 class _CardBase(QFrame):
@@ -109,9 +130,32 @@ class _CardBase(QFrame):
         super().leaveEvent(event)
 
 
+def _pod_in_trouble(status: str, restarts) -> bool:
+    """True when a pod's card should offer the inline AI-diagnose button —
+    i.e. it looks worth explaining rather than every pod all the time.
+    Mirrors _status_color_key's DANGER bucket, plus a restart count as a
+    second signal (a pod can be back to "Running" between crash-loop
+    restarts, so status alone would miss it)."""
+    if _status_color_key(status) == "DANGER":
+        return True
+    try:
+        return int(str(restarts).strip() or "0") > 0
+    except ValueError:
+        return False
+
+
 class PodCardWidget(_CardBase):
     """One pod, as a card. `meta` matches what _populate_pods builds:
-    namespace, name, ready, status, restarts, last_restart, age, ip, node."""
+    namespace, name, ready, status, restarts, last_restart, age, ip, node.
+
+    Emits `ai_requested(meta)` when the inline ✨ AI button is clicked —
+    only shown for pods that look like they're in trouble (see
+    _pod_in_trouble). The owner (KubernetesTab) wires this up to fetch
+    that pod's logs and hand them to ai_assist.AIExplainWorker, the same
+    diagnosis flow already used by LogViewerDialog's "Analyze with AI"
+    button, without requiring the user to open the full log viewer first."""
+
+    ai_requested = pyqtSignal(dict)
 
     def __init__(self, meta: dict, show_namespace: bool, parent=None):
         super().__init__(_status_accent(meta.get("status", "")), parent)
@@ -136,6 +180,13 @@ class PodCardWidget(_CardBase):
 
         status = meta.get("status", "") or "Unknown"
         top.addWidget(_pill(status, _status_color_key(status)))
+
+        self._ai_btn = None
+        if _pod_in_trouble(status, meta.get("restarts")):
+            self._ai_btn = _ai_button("Ask AI to diagnose this pod")
+            self._ai_btn.clicked.connect(lambda: self.ai_requested.emit(meta))
+            top.addWidget(self._ai_btn)
+
         outer.addLayout(top)
 
         bottom = QHBoxLayout()
@@ -158,6 +209,15 @@ class PodCardWidget(_CardBase):
         bottom.addWidget(node_lbl, 1)
 
         outer.addLayout(bottom)
+
+    def set_ai_busy(self, busy: bool):
+        """Called by KubernetesTab while a diagnosis for this pod is in
+        flight, so re-clicking the same card's button mid-request isn't
+        possible — cards are rebuilt from scratch on every refresh, so
+        this only needs to hold for the lifetime of one request."""
+        if self._ai_btn is not None:
+            self._ai_btn.setEnabled(not busy)
+            self._ai_btn.setText("✨ …" if busy else "✨ AI")
 
 
 class DeploymentCardWidget(_CardBase):
