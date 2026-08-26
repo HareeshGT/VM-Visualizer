@@ -14,11 +14,12 @@ from PyQt5.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
 )
-from PyQt5.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, pyqtProperty
+from PyQt5.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, pyqtProperty, QTimer
 from PyQt5.QtGui import QFont, QColor
 
 from themes import T, apply_qss_to
 from security import verify_pin, get_lock_settings
+from progress_ring import CircularProgress
 
 
 def _alpha(hex_color: str, opacity: float) -> str:
@@ -287,18 +288,32 @@ class AppLockDialog(QDialog):
         lay.addSpacing(26)
 
         # ---------------------------------------------------------
+        # Form container — everything that should disappear once the
+        # PIN is verified and the success view takes over (see
+        # _show_success below). Kept as one widget so the swap is a
+        # single hide()/show() pair instead of hiding N children.
+        # ---------------------------------------------------------
+        self.form_view = QWidget(self.card)
+        self.form_view.setAttribute(Qt.WA_StyledBackground, True)
+        self.form_view.setStyleSheet("background: transparent; border: none;")
+        form_lay = QVBoxLayout(self.form_view)
+        form_lay.setContentsMargins(0, 0, 0, 0)
+        form_lay.setSpacing(0)
+
+        # ---------------------------------------------------------
         # PIN input (pill field w/ leading glyph)
         # ---------------------------------------------------------
-        self.pin_field = _PillField("🔑", "Enter PIN", self.card)
+        self.pin_field = _PillField("🔑", "Enter PIN", self.form_view)
         self.pin_field.returnPressed().connect(self._try_unlock)
-        lay.addWidget(self.pin_field)
-        lay.addSpacing(6)
+        form_lay.addWidget(self.pin_field)
+        form_lay.addSpacing(6)
 
         # ---------------------------------------------------------
         # Error / status message
         # ---------------------------------------------------------
         self.error_lbl = QLabel("")
         self.error_lbl.setAlignment(Qt.AlignCenter)
+        self.error_lbl.setWordWrap(True)
         self.error_lbl.setFixedHeight(22)
 
         self.error_lbl.setStyleSheet(f"""
@@ -311,8 +326,8 @@ class AppLockDialog(QDialog):
             }}
         """)
 
-        lay.addWidget(self.error_lbl)
-        lay.addSpacing(8)
+        form_lay.addWidget(self.error_lbl)
+        form_lay.addSpacing(8)
 
         # ---------------------------------------------------------
         # Buttons
@@ -324,6 +339,12 @@ class AppLockDialog(QDialog):
         quit_btn = QPushButton("Quit")
         quit_btn.setFixedHeight(48)
         quit_btn.setCursor(Qt.PointingHandCursor)
+        # Enter/Return in the PIN field is handled explicitly via
+        # returnPressed() above — without this, Qt's "first button is
+        # auto-default" behavior could let Return land on Quit instead
+        # of Unlock in some focus states, which reads exactly like "a
+        # wrong (or even a right) PIN just closes the dialog".
+        quit_btn.setAutoDefault(False)
         quit_btn.clicked.connect(self._quit_app)
 
         quit_btn.setStyleSheet(f"""
@@ -354,6 +375,8 @@ class AppLockDialog(QDialog):
         unlock_btn = QPushButton("Unlock")
         unlock_btn.setFixedHeight(48)
         unlock_btn.setCursor(Qt.PointingHandCursor)
+        unlock_btn.setAutoDefault(True)
+        unlock_btn.setDefault(True)
         unlock_btn.clicked.connect(self._try_unlock)
 
         unlock_btn.setStyleSheet(f"""
@@ -387,7 +410,71 @@ class AppLockDialog(QDialog):
 
         btn_row.addWidget(unlock_btn, 1)
 
-        lay.addLayout(btn_row)
+        form_lay.addLayout(btn_row)
+        lay.addWidget(self.form_view)
+
+        # ---------------------------------------------------------
+        # Success view — swapped in for form_view once the PIN is
+        # verified. A ring animates from 0 -> 100 (reusing the same
+        # CircularProgress used elsewhere in the app), then flips to a
+        # green checkmark badge with a "Logged in successfully" caption
+        # before the dialog auto-accepts. Built hidden; see
+        # _show_success().
+        # ---------------------------------------------------------
+        self.success_view = QWidget(self.card)
+        self.success_view.setAttribute(Qt.WA_StyledBackground, True)
+        self.success_view.setStyleSheet("background: transparent; border: none;")
+        succ_lay = QVBoxLayout(self.success_view)
+        succ_lay.setContentsMargins(0, 10, 0, 10)
+        succ_lay.setSpacing(0)
+
+        ring_row = QHBoxLayout()
+        ring_row.addStretch()
+
+        self._success_stack = QWidget(self.success_view)
+        self._success_stack.setFixedSize(64, 64)
+        self._success_stack.setStyleSheet("background: transparent; border: none;")
+
+        self.success_ring = CircularProgress(
+            size=64, thickness=6, show_text=False, parent=self._success_stack
+        )
+        self.success_ring.move(0, 0)
+        self.success_ring.setValue(0, color=T["SUCCESS"])
+
+        self.success_check = QLabel("✓", self._success_stack)
+        self.success_check.setGeometry(0, 0, 64, 64)
+        self.success_check.setAlignment(Qt.AlignCenter)
+        self.success_check.setStyleSheet(f"""
+            QLabel {{
+                color: {T['SUCCESS']};
+                font-size: 30px;
+                font-weight: 900;
+                background: transparent;
+                border: none;
+            }}
+        """)
+        self.success_check.hide()
+
+        ring_row.addWidget(self._success_stack)
+        ring_row.addStretch()
+        succ_lay.addLayout(ring_row)
+        succ_lay.addSpacing(16)
+
+        self.success_lbl = QLabel("Verifying…")
+        self.success_lbl.setAlignment(Qt.AlignCenter)
+        self.success_lbl.setStyleSheet(f"""
+            QLabel {{
+                color: {T['TEXT_PRIMARY']};
+                font-size: 15px;
+                font-weight: 700;
+                background: transparent;
+                border: none;
+            }}
+        """)
+        succ_lay.addWidget(self.success_lbl)
+
+        lay.addWidget(self.success_view)
+        self.success_view.hide()
 
         # ---------------------------------------------------------
         # Bottom hint
@@ -440,21 +527,53 @@ class AppLockDialog(QDialog):
     # -------------------------------------------------------------
 
     def _try_unlock(self):
+        if not self.form_view.isVisible():
+            # Success animation already running (or a stray double-click/
+            # double Enter) — ignore further attempts.
+            return
+
         settings = get_lock_settings()
         pin = self.pin_field.text()
 
-        if verify_pin(
-            pin,
-            settings["salt"],
-            settings["pin_hash"]
-        ):
-            self.accept()
+        if not pin:
+            self.error_lbl.setText("Enter your PIN.")
+            self._shake_card()
             return
 
+        if verify_pin(pin, settings["salt"], settings["pin_hash"]):
+            self.error_lbl.setText("")
+            self._show_success()
+            return
+
+        # Wrong PIN — stay on the lock screen, surface the error clearly,
+        # and let the user try again. Nothing here closes the dialog.
         self.error_lbl.setText("Incorrect PIN. Please try again.")
         self.pin_field.clear()
         self.pin_field.setFocus()
         self._shake_card()
+
+    def _show_success(self):
+        """Swap the PIN form for a ring-then-checkmark success view, then
+        auto-accept the dialog a short moment later."""
+        self.pin_field.edit.setEnabled(False)
+        self.form_view.hide()
+
+        self.success_check.hide()
+        self.success_ring.show()
+        self.success_lbl.setText("Verifying…")
+        self.success_view.show()
+
+        # Ring animates 0 -> 100 (CircularProgress.ANIM_MS ≈ 450ms
+        # internally); give it a little extra so the ease-out settles
+        # before we flip to the checkmark.
+        self.success_ring.setValue(100, color=T["SUCCESS"])
+        QTimer.singleShot(CircularProgress.ANIM_MS + 150, self._show_success_check)
+
+    def _show_success_check(self):
+        self.success_ring.hide()
+        self.success_check.show()
+        self.success_lbl.setText("Logged in successfully")
+        QTimer.singleShot(650, self.accept)
 
     def _shake_card(self):
         anim = QPropertyAnimation(self, b"pos", self)
