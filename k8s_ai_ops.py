@@ -17,6 +17,8 @@ Scale operations support two modes:
 
 import json
 import re
+import threading
+import time
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -28,13 +30,29 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QTextBrowser,
     QMessageBox,
+    QShortcut,
 )
 from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtGui import QKeySequence
 
 import ai_assist
 from themes import T, load_settings, save_settings
 from workers import CommandWorker, track_worker
 from utils import monospace_font
+
+
+# Classic Google Web Speech API through SpeechRecognition.
+# This is deliberately NOT an LLM/AI transcription service.
+try:
+    import speech_recognition as sr
+    _VOICE_AVAILABLE = True
+except ImportError:
+    sr = None
+    _VOICE_AVAILABLE = False
+
+GOOGLE_STT_LANGUAGE = "en-IN"
+VOICE_MAX_SECONDS = 90
+VOICE_AMBIENT_CALIBRATION_SECONDS = 0.4
 
 
 ALLOWED_ACTIONS = {
@@ -297,6 +315,119 @@ def _extract_json(text: str):
     raise ValueError("The AI response was not valid JSON.")
 
 
+
+class K8sGoogleSpeechWorker(QThread):
+    """Record microphone audio until stopped, then transcribe it with
+    SpeechRecognition's classic Google Web Speech recognizer.
+
+    No LLM is used here. Only the resulting text is emitted to the AI Ops
+    widget, which then uses the existing AI provider for Kubernetes intent.
+    """
+
+    done = pyqtSignal(str)
+    error = pyqtSignal(str)
+    listening = pyqtSignal()
+    stopped = pyqtSignal()
+
+    def __init__(
+        self,
+        language: str = GOOGLE_STT_LANGUAGE,
+        max_seconds: int = VOICE_MAX_SECONDS,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._language = language
+        self._max_seconds = max_seconds
+        self._stop_event = threading.Event()
+        self.finished.connect(self.deleteLater)
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        if not _VOICE_AVAILABLE:
+            self.error.emit(
+                "Voice input is unavailable because SpeechRecognition/PyAudio "
+                "is not installed."
+            )
+            return
+
+        recognizer = sr.Recognizer()
+
+        try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(
+                    source,
+                    duration=VOICE_AMBIENT_CALIBRATION_SECONDS,
+                )
+
+                self.listening.emit()
+
+                frames = []
+                started = time.monotonic()
+
+                while (
+                    not self._stop_event.is_set()
+                    and (time.monotonic() - started) < self._max_seconds
+                ):
+                    try:
+                        frames.append(
+                            source.stream.read(
+                                source.CHUNK,
+                                exception_on_overflow=False,
+                            )
+                        )
+                    except TypeError:
+                        # Compatibility with older PyAudio versions.
+                        frames.append(source.stream.read(source.CHUNK))
+
+                self.stopped.emit()
+
+                if not frames:
+                    self.error.emit("No audio was captured.")
+                    return
+
+                audio = sr.AudioData(
+                    b"".join(frames),
+                    source.SAMPLE_RATE,
+                    source.SAMPLE_WIDTH,
+                )
+
+            try:
+                text = recognizer.recognize_google(
+                    audio,
+                    language=self._language,
+                )
+            except sr.UnknownValueError:
+                self.error.emit(
+                    "Google Speech could not understand the recording."
+                )
+                return
+            except sr.RequestError as exc:
+                self.error.emit(
+                    f"Google Speech recognition request failed: {exc}"
+                )
+                return
+
+            text = (text or "").strip()
+
+            if not text:
+                self.error.emit(
+                    "Google Speech returned an empty transcription."
+                )
+                return
+
+            self.done.emit(text)
+
+        except AttributeError:
+            self.error.emit(
+                "Microphone support is unavailable. Install PyAudio "
+                "and SpeechRecognition."
+            )
+        except Exception as exc:
+            self.error.emit(f"Voice input failed: {exc}")
+
+
 def validate_action(data: dict):
     if not isinstance(data, dict):
         raise ValueError("The AI returned an invalid operation object.")
@@ -483,6 +614,8 @@ class K8sAIOpsWidget(QWidget):
         self._operation_worker = None
         self._scale_previous_worker = None
         self._pending_scale_action = None
+        self._voice_worker = None
+        self._voice_recording = False
         self._busy = False
         self._history = _load_history()
         self._build_ui()
@@ -534,6 +667,16 @@ class K8sAIOpsWidget(QWidget):
         examples.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px;")
         root.addWidget(examples)
 
+        self.voice_hint_lbl = QLabel(
+            "Voice: Google Web Speech (classic ASR, not an LLM) · "
+            "Ctrl+Shift+Space to start/stop"
+        )
+        self.voice_hint_lbl.setWordWrap(True)
+        self.voice_hint_lbl.setStyleSheet(
+            f"color: {T['TEXT_MUTED']}; font-size: 10px;"
+        )
+        root.addWidget(self.voice_hint_lbl)
+
         self.request_input = QLineEdit()
         self.request_input.setPlaceholderText(
             "Ask AI to perform a Kubernetes operation…"
@@ -547,6 +690,20 @@ class K8sAIOpsWidget(QWidget):
         self.run_btn.setFixedHeight(34)
         self.run_btn.clicked.connect(self._submit)
         btn_row.addWidget(self.run_btn)
+
+        self.voice_btn = QPushButton("🎙  Voice")
+        self.voice_btn.setFixedHeight(34)
+        self.voice_btn.setToolTip(
+            "Start/stop voice command. Hotkey: Ctrl+Shift+Space"
+        )
+        self.voice_btn.clicked.connect(self._toggle_voice_recording)
+        btn_row.addWidget(self.voice_btn)
+
+        self.voice_shortcut = QShortcut(
+            QKeySequence("Ctrl+Shift+Space"),
+            self,
+        )
+        self.voice_shortcut.activated.connect(self._toggle_voice_recording)
 
         clear_btn = QPushButton("Clear Output")
         clear_btn.setFixedHeight(34)
@@ -637,15 +794,177 @@ class K8sAIOpsWidget(QWidget):
 
     def _set_busy(self, busy: bool):
         self._busy = busy
-        self.request_input.setEnabled(not busy)
-        self.run_btn.setEnabled(not busy)
-        self.clear_history_btn.setEnabled(not busy)
+        self.request_input.setEnabled(not busy and not self._voice_recording)
+        self.run_btn.setEnabled(not busy and not self._voice_recording)
+        self.voice_btn.setEnabled(not busy or self._voice_recording)
+        self.clear_history_btn.setEnabled(not busy and not self._voice_recording)
         if busy:
             self.run_btn.setText("✨  Thinking…")
             self.status_lbl.setText("AI is interpreting…")
         else:
             self.run_btn.setText("✨  Run with AI")
             self.status_lbl.setText("Ready")
+
+
+    # ------------------------------------------------------------------
+    # Voice input
+    # ------------------------------------------------------------------
+
+    def _toggle_voice_recording(self):
+        """Start/stop microphone capture without using an LLM for STT."""
+
+        if self._voice_recording:
+            self._stop_voice_recording()
+            return
+
+        if self._busy:
+            return
+
+        if not _VOICE_AVAILABLE:
+            QMessageBox.information(
+                self,
+                "Voice Input Unavailable",
+                "Install the voice-input dependencies first:\n\n"
+                "python3 -m pip install SpeechRecognition PyAudio\n\n"
+                "On macOS, install PortAudio first if PyAudio cannot build:\n"
+                "brew install portaudio",
+            )
+            return
+
+        if self._ai_worker is not None or self._operation_worker is not None:
+            self._write_info(
+                "\nPlease wait for the current AI/Kubernetes operation to finish."
+            )
+            return
+
+        self._start_voice_recording()
+
+    def _start_voice_recording(self):
+        if self._voice_worker is not None:
+            return
+
+        self._voice_recording = True
+
+        self.voice_btn.setText("⏹  Stop Voice")
+        self.voice_btn.setToolTip(
+            "Stop recording and send the transcription to AI Ops"
+        )
+
+        self.request_input.clear()
+        self.request_input.setPlaceholderText(
+            "Listening… speak your Kubernetes command"
+        )
+        self.request_input.setEnabled(False)
+
+        self.run_btn.setEnabled(False)
+        self.clear_history_btn.setEnabled(False)
+
+        self.status_lbl.setText("Listening…")
+
+        self._write_info(
+            "\n🎙 Listening… say a Kubernetes operation, then press "
+            "Stop Voice or Ctrl+Shift+Space."
+        )
+
+        worker = K8sGoogleSpeechWorker(
+            language=GOOGLE_STT_LANGUAGE,
+            max_seconds=VOICE_MAX_SECONDS,
+        )
+
+        worker.listening.connect(self._on_voice_listening)
+        worker.stopped.connect(self._on_voice_stopped)
+        worker.done.connect(self._on_voice_done)
+        worker.error.connect(self._on_voice_error)
+        worker.finished.connect(self._on_voice_finished)
+
+        self._voice_worker = worker
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _stop_voice_recording(self):
+        worker = self._voice_worker
+        if worker is None:
+            return
+
+        self.status_lbl.setText("Transcribing…")
+        self.voice_btn.setText("⌛  Transcribing…")
+        self.voice_btn.setEnabled(False)
+
+        worker.stop()
+
+    def _on_voice_listening(self):
+        if self._voice_recording:
+            self.status_lbl.setText("Listening…")
+
+    def _on_voice_stopped(self):
+        if self._voice_recording:
+            self.status_lbl.setText("Transcribing…")
+
+    def _on_voice_done(self, text: str):
+        text = (text or "").strip()
+
+        if not text:
+            self._on_voice_error("The voice transcription was empty.")
+            return
+
+        self.request_input.setPlaceholderText(
+            "Ask AI to perform a Kubernetes operation…"
+        )
+        self.request_input.setText(text)
+
+        self._write_info(
+            f'\n🎙 You said: "{self._escape_html(text)}"'
+        )
+
+        # Feed the recognized text directly into the existing AI pipeline.
+        self._voice_recording = False
+        self.voice_btn.setEnabled(True)
+        self.voice_btn.setText("🎙  Voice")
+        self.voice_btn.setToolTip(
+            "Start/stop voice command. Hotkey: Ctrl+Shift+Space"
+        )
+        self.request_input.setEnabled(True)
+
+        self._submit()
+
+    def _on_voice_error(self, message: str):
+        self._write_error("\n🎙 Voice input error:\n" + str(message))
+
+        self._voice_recording = False
+
+        self.request_input.setPlaceholderText(
+            "Ask AI to perform a Kubernetes operation…"
+        )
+        self.request_input.setEnabled(not self._busy)
+
+        self.voice_btn.setEnabled(not self._busy)
+        self.voice_btn.setText("🎙  Voice")
+        self.voice_btn.setToolTip(
+            "Start/stop voice command. Hotkey: Ctrl+Shift+Space"
+        )
+
+        self.status_lbl.setText("Ready")
+
+    def _on_voice_finished(self):
+        self._voice_worker = None
+
+        if self._voice_recording:
+            self._voice_recording = False
+
+        self.voice_btn.setEnabled(not self._busy)
+        self.voice_btn.setText("🎙  Voice")
+        self.voice_btn.setToolTip(
+            "Start/stop voice command. Hotkey: Ctrl+Shift+Space"
+        )
+
+        self.request_input.setPlaceholderText(
+            "Ask AI to perform a Kubernetes operation…"
+        )
+        self.request_input.setEnabled(not self._busy)
+
+        if not self._busy:
+            self.status_lbl.setText("Ready")
+
 
     def _clear_output(self):
         if self._busy:
@@ -1005,6 +1324,12 @@ class K8sAIOpsWidget(QWidget):
         self._update_history_label()
 
     def closeEvent(self, event):
+        if self._voice_worker is not None:
+            try:
+                self._voice_worker.stop()
+            except Exception:
+                pass
+
         if self._ai_worker is not None:
             try:
                 self._ai_worker.quit()

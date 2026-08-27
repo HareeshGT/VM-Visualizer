@@ -9,6 +9,8 @@
 
 PyQt5>=5.15,<6
 paramiko>=3.0
+SpeechRecognition>=3.10,<4
+PyAudio>=0.2.13
 
 # ── Optional: only needed to build the macOS .app bundle ──
 pyinstaller>=6.0

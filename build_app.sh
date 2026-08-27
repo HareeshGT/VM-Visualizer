@@ -61,22 +61,51 @@ fi
 echo "Using Python: $PYTHON"
 
 # --------------------------------------------------
+# Install Requirements
+# --------------------------------------------------
+
+if [ -f requirements.txt ]; then
+    echo
+    echo "Installing requirements..."
+
+    # PyAudio needs PortAudio headers/libraries when pip has to build it
+    # from source. Install the native dependency on macOS when Homebrew
+    # is available, before pip installs the Python requirements.
+    if [[ "$OS" == "Darwin" ]]; then
+        if ! command -v brew >/dev/null 2>&1; then
+            echo
+            echo "Homebrew is required on macOS to install PortAudio for voice input."
+            echo "Install Homebrew from https://brew.sh/ and run this script again."
+            exit 1
+        fi
+
+        if ! brew list --formula portaudio >/dev/null 2>&1; then
+            echo
+            echo "Installing PortAudio for microphone voice input..."
+            brew install portaudio
+        else
+            echo "PortAudio already installed."
+        fi
+
+        # Make the PortAudio headers/libs visible to PyAudio's compiler,
+        # especially on Apple Silicon where Homebrew normally lives in
+        # /opt/homebrew.
+        export CPPFLAGS="${CPPFLAGS:-} -I$(brew --prefix portaudio)/include"
+        export LDFLAGS="${LDFLAGS:-} -L$(brew --prefix portaudio)/lib"
+        export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}:$(brew --prefix portaudio)/lib/pkgconfig"
+    fi
+
+    "$PYTHON" -m pip install --upgrade pip
+    "$PYTHON" -m pip install -r requirements.txt
+fi
+
+# --------------------------------------------------
 # Install PyInstaller
 # --------------------------------------------------
 
 if ! "$PYTHON" -c "import PyInstaller" >/dev/null 2>&1; then
     echo "Installing PyInstaller..."
-    "$PYTHON" -m pip install --upgrade pip
     "$PYTHON" -m pip install pyinstaller
-fi
-
-# --------------------------------------------------
-# Install Requirements
-# --------------------------------------------------
-
-if [ -f requirements.txt ]; then
-    echo "Installing requirements..."
-    "$PYTHON" -m pip install -r requirements.txt
 fi
 
 # --------------------------------------------------
@@ -112,6 +141,15 @@ CMD=(
     --hidden-import=paramiko
     --collect-all=paramiko
 )
+
+# SpeechRecognition + PyAudio are imported by k8s_ai_ops.py.
+# Keep PyAudio explicitly included because it contains a compiled extension.
+if "$PYTHON" -c "import speech_recognition, pyaudio" >/dev/null 2>&1; then
+    CMD+=(
+        --hidden-import=speech_recognition
+        --hidden-import=pyaudio
+    )
+fi
 
 if [ -n "$ICON" ]; then
     CMD+=(--icon="$ICON")
@@ -183,6 +221,5 @@ rm -rf "$DIR"
 echo
 echo "=========================================="
 echo "EC2 Manager installed successfully!"
+echo "Voice input support included for K8s AI Ops"
 echo "=========================================="
-
-
