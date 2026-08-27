@@ -20,6 +20,8 @@ import re
 import threading
 import time
 from datetime import datetime
+import os
+import sys
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -31,6 +33,7 @@ from PyQt5.QtWidgets import (
     QTextBrowser,
     QMessageBox,
     QShortcut,
+    QProgressBar,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QKeySequence
@@ -315,6 +318,119 @@ def _extract_json(text: str):
 
     raise ValueError("The AI response was not valid JSON.")
 
+def _get_flac_path():
+    """
+    Return the native FLAC executable that should be used by
+    SpeechRecognition.
+
+    Finder-launched macOS apps do not inherit the user's shell PATH,
+    so do not rely on `shutil.which("flac")` alone.
+    """
+
+    if sys.platform == "darwin":
+        candidates = [
+            "/opt/homebrew/bin/flac",   # Apple Silicon Homebrew
+            "/usr/local/bin/flac",      # Intel Homebrew
+            "/usr/bin/flac",
+        ]
+    else:
+        candidates = ["flac"]
+
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    return None
+
+def _prepare_system_flac():
+    """Make a native FLAC executable available to SpeechRecognition.
+
+    Finder-launched macOS apps do not necessarily inherit the shell PATH.
+    Prefer Homebrew's native Apple Silicon FLAC over SpeechRecognition's
+    bundled fallback executable.
+    """
+
+    if os.name != "posix":
+        return
+
+    candidates = [
+        "/opt/homebrew/bin/flac",
+        "/usr/local/bin/flac",
+        "/usr/bin/flac",
+    ]
+
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            # SpeechRecognition's get_flac_converter() checks PATH first.
+            current_path = os.environ.get("PATH", "")
+            path_parts = current_path.split(os.pathsep) if current_path else []
+
+            if os.path.dirname(path) not in path_parts:
+                os.environ["PATH"] = (
+                    os.path.dirname(path)
+                    + os.pathsep
+                    + current_path
+                    if current_path
+                    else os.path.dirname(path)
+                )
+
+            return
+
+    raise RuntimeError(
+        "FLAC converter not found. Expected Homebrew FLAC at "
+        "/opt/homebrew/bin/flac. Install it with: brew install flac"
+    )
+
+def _mic_level_percent(chunk: bytes, sample_width: int) -> int:
+    """Convert a PCM microphone chunk into a 0-100 activity level.
+
+    This is only a visual meter. It does not perform speech recognition.
+    """
+
+    if not chunk:
+        return 0
+
+    try:
+        if sample_width == 2:
+            # Signed little-endian 16-bit PCM.
+            sample_count = len(chunk) // 2
+
+            if sample_count <= 0:
+                return 0
+
+            total = 0
+
+            for i in range(0, sample_count * 2, 2):
+                sample = int.from_bytes(
+                    chunk[i:i + 2],
+                    byteorder="little",
+                    signed=True,
+                )
+                total += sample * sample
+
+            rms = (total / sample_count) ** 0.5
+
+            # Typical speech levels are much lower than full-scale PCM.
+            # Compress the raw range into something visually useful.
+            level = min(100, int((rms / 9000.0) * 100))
+
+            return max(0, level)
+
+        # Generic fallback for other sample widths.
+        max_value = float((1 << (8 * sample_width - 1)) - 1)
+
+        if max_value <= 0:
+            return 0
+
+        avg = sum(abs(b - 128) for b in chunk) / len(chunk)
+
+        return max(
+            0,
+            min(100, int((avg / 64.0) * 100)),
+        )
+
+    except Exception:
+        return 0
 
 
 class K8sGoogleSpeechWorker(QThread):
@@ -329,6 +445,7 @@ class K8sGoogleSpeechWorker(QThread):
     error = pyqtSignal(str)
     listening = pyqtSignal()
     stopped = pyqtSignal()
+    level = pyqtSignal(int)
 
     def __init__(
         self,
@@ -372,16 +489,35 @@ class K8sGoogleSpeechWorker(QThread):
                     and (time.monotonic() - started) < self._max_seconds
                 ):
                     try:
-                        frames.append(
-                            source.stream.read(
-                                source.CHUNK,
-                                exception_on_overflow=False,
+                        chunk = source.stream.read(
+                            source.CHUNK,
+                            exception_on_overflow=False,
+                        )
+
+                        frames.append(chunk)
+
+                        # Send microphone activity to the UI.
+                        self.level.emit(
+                            _mic_level_percent(
+                                chunk,
+                                source.SAMPLE_WIDTH,
                             )
                         )
+
                     except TypeError:
                         # Compatibility with older PyAudio versions.
-                        frames.append(source.stream.read(source.CHUNK))
+                        chunk = source.stream.read(source.CHUNK)
 
+                        frames.append(chunk)
+
+                        self.level.emit(
+                            _mic_level_percent(
+                                chunk,
+                                source.SAMPLE_WIDTH,
+                            )
+                        )
+                        
+                self.level.emit(0)
                 self.stopped.emit()
 
                 if not frames:
@@ -393,6 +529,24 @@ class K8sGoogleSpeechWorker(QThread):
                     source.SAMPLE_RATE,
                     source.SAMPLE_WIDTH,
                 )
+            flac_path = _get_flac_path()
+            if not flac_path:
+                self.error.emit(
+                    "FLAC executable not found. "
+                    "Please install FLAC with: brew install flac"
+                )
+                return
+
+            # Finder-launched macOS apps do not inherit the terminal PATH.
+            # Explicitly force SpeechRecognition to use Homebrew's native FLAC.
+            flac_dir = os.path.dirname(flac_path)
+            os.environ["PATH"] = (
+                flac_dir
+                + os.pathsep
+                + os.environ.get("PATH", "")
+            )
+
+            sr.audio.get_flac_converter = lambda: flac_path
 
             try:
                 text = recognizer.recognize_google(
@@ -713,6 +867,36 @@ class K8sAIOpsWidget(QWidget):
         self.voice_btn.clicked.connect(self._toggle_voice_recording)
         btn_row.addWidget(self.voice_btn)
 
+        self.mic_level_bar = QProgressBar()
+        self.mic_level_bar.setRange(0, 100)
+        self.mic_level_bar.setValue(0)
+        self.mic_level_bar.setFixedWidth(120)
+        self.mic_level_bar.setFixedHeight(12)
+        self.mic_level_bar.setTextVisible(False)
+        self.mic_level_bar.setToolTip("Live microphone input level")
+        self.mic_level_bar.setStyleSheet(
+            f"""
+            QProgressBar {{
+                background: {T['BG_ITEM']};
+                border: 1px solid {T['BORDER']};
+                border-radius: 6px;
+            }}
+
+            QProgressBar::chunk {{
+                background: {T['ACCENT']};
+                border-radius: 5px;
+            }}
+            """
+        )
+
+        self.mic_level_label = QLabel("Mic")
+        self.mic_level_label.setStyleSheet(
+            f"color: {T['TEXT_MUTED']}; font-size: 10px;"
+        )
+
+        btn_row.addWidget(self.mic_level_label)
+        btn_row.addWidget(self.mic_level_bar)
+
         self.voice_shortcut = QShortcut(
             QKeySequence("Ctrl+Shift+Space"),
             self,
@@ -990,6 +1174,7 @@ class K8sAIOpsWidget(QWidget):
 
         worker.listening.connect(self._on_voice_listening)
         worker.stopped.connect(self._on_voice_stopped)
+        worker.level.connect(self._on_voice_level)
         worker.done.connect(self._on_voice_done)
         worker.error.connect(self._on_voice_error)
         worker.finished.connect(self._on_voice_finished)
@@ -1008,6 +1193,24 @@ class K8sAIOpsWidget(QWidget):
         self.voice_btn.setEnabled(False)
 
         worker.stop()
+    def _on_voice_level(self, level: int):
+        """Update the live microphone meter."""
+
+        if not hasattr(self, "mic_level_bar"):
+            return
+
+        level = max(0, min(100, int(level)))
+
+        self.mic_level_bar.setValue(level)
+
+        if level >= 75:
+            self.mic_level_label.setText("Mic 🔊")
+        elif level >= 35:
+            self.mic_level_label.setText("Mic 🔉")
+        elif level >= 5:
+            self.mic_level_label.setText("Mic 🔈")
+        else:
+            self.mic_level_label.setText("Mic")
 
     def _on_voice_listening(self):
         if self._voice_recording:
@@ -1078,6 +1281,12 @@ class K8sAIOpsWidget(QWidget):
             "Ask AI to perform a Kubernetes operation…"
         )
         self.request_input.setEnabled(not self._busy)
+
+        if hasattr(self, "mic_level_bar"):
+            self.mic_level_bar.setValue(0)
+
+        if hasattr(self, "mic_level_label"):
+            self.mic_level_label.setText("Mic")
 
         if not self._busy:
             self.status_lbl.setText("Ready")
