@@ -1561,7 +1561,54 @@ class K8sAIOpsWidget(QWidget):
         self._execute_action(action)
 
     def _on_ai_error(self, message: str):
-        self._write_error(f"\nAI error:\n{message}")
+        """Show AI/provider errors in a dialog and keep a compact log entry."""
+
+        message = str(message or "Unknown AI error").strip()
+
+        # Keep the output area useful without dumping a huge API response.
+        self._write_error(
+            f"\nAI error:\n{message}"
+        )
+
+        # Pick a useful title based on the error.
+        lower = message.lower()
+
+        if "429" in lower or "quota" in lower or "rate limit" in lower:
+            title = "AI API Quota Exceeded"
+        elif "401" in lower or "unauthorized" in lower or "invalid api key" in lower:
+            title = "AI API Authentication Error"
+        elif "403" in lower or "forbidden" in lower:
+            title = "AI API Access Denied"
+        elif "timeout" in lower:
+            title = "AI API Timeout"
+        elif "connection" in lower or "network" in lower:
+            title = "AI API Connection Error"
+        else:
+            title = "AI API Error"
+
+        # Show the complete provider message so quota/reset information is
+        # still visible to the user.
+        dlg = QMessageBox(self)
+        dlg.setIcon(QMessageBox.Warning)
+        dlg.setWindowTitle(title)
+        dlg.setText(title)
+
+        # Detailed text keeps long provider responses readable.
+        dlg.setInformativeText(
+            "The AI request could not be completed."
+        )
+        dlg.setDetailedText(message)
+
+        # Make the dialog wide enough for API messages.
+        dlg.setStyleSheet(
+            f"""
+            QMessageBox {{
+                min-width: 520px;
+            }}
+            """
+        )
+
+        dlg.exec_()
 
     def _on_ai_finished(self):
         self._ai_worker = None
