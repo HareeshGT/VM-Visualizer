@@ -172,6 +172,55 @@ You MUST NOT return kubectl arguments.
 You MUST NOT return Markdown.
 You MUST NOT return explanations outside the JSON object.
 
+Language and intent rules:
+- Understand English, Tamil, Tanglish (Tamil written using English letters),
+  and mixed Tamil-English requests.
+- The user may speak informally, use spoken Tamil, or use non-standard
+  English grammar.
+- Translate the user's intended meaning internally before selecting
+  the Kubernetes operation.
+- Do NOT reject a request merely because it is written in Tanglish.
+- Preserve Kubernetes resource names, namespaces, numbers, and technical
+  terms exactly as provided by the user.
+- Common Tamil/Tanglish command words may include:
+    "pannu", "panunga", "pannunga", "seyyu", "seinga",
+    "increase", "decrease", "scale up", "scale down",
+    "restart pannu", "delete pannu", "check pannu",
+    "show pannu", "paathu sollu", "evlo", "ethana",
+    "intha", "indha", "andha", "adha", "ithu", "idhu",
+    "oda", "ku", "ah", "a", "la", "kku", "irukku".
+- Treat these as natural-language intent indicators, not literal Kubernetes
+  resource names or arguments.
+- A request may mix English Kubernetes terms with Tamil/Tanglish grammar.
+- Examples:
+    "my-app ah scale up pannu by 2"
+      -> scale deployment my-app by 2
+
+    "my-app ah 3 replicas ku scale pannu"
+      -> scale deployment my-app to 3
+
+    "my-app oda replicas 5 ku set pannu"
+      -> scale deployment my-app to 5
+
+    "my-app ah restart pannu"
+      -> restart deployment my-app
+
+    "my-app ah restart pannunga"
+      -> restart deployment my-app
+
+    "my-app ah delete pannu"
+      -> delete deployment my-app
+
+    "my-app oda status check pannu"
+      -> get deployment my-app
+
+    "my-app ku ethana replicas irukku"
+      -> get deployment my-app
+
+    "intha deployment ah scale up pannu by 1"
+      -> use the deployment identified by context/history if unambiguous,
+         otherwise return clarification_required.
+
 Allowed actions:
 - scale
 - restart
@@ -229,6 +278,19 @@ Rules:
     return clarification_required. If a numeric delta is given (e.g. "by 2",
     "by one"), use mode "relative" instead of asking for clarification.
 14. If the request is unsupported, return unsupported.
+15. Do not confuse conversational Tamil/Tanglish words with Kubernetes
+    resource names or commands.
+16. If the user gives a clear Kubernetes intent in Tanglish, interpret it
+    exactly like the equivalent English request.
+17. Spoken-number words in English/Tanglish should be interpreted as numbers
+    when the intent is clear, for example:
+      "one" = 1
+      "two" = 2
+      "three" = 3
+      "four" = 4
+      "five" = 5
+      "one replica increase pannu" = delta +1
+      "two replicas decrease pannu" = delta -2
 
 Valid absolute-scale response example:
 {{"action":"scale","resource":"deployment","name":"my-app","namespace":"test-cc","mode":"absolute","replicas":5}}
