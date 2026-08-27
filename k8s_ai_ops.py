@@ -7,6 +7,12 @@ shell command; this module constructs the kubectl command after validation.
 Operation history is persisted through themes.load_settings()/save_settings()
 under the ``k8s_ai_ops_history`` settings key, so recent operations survive
 application restarts and can be supplied as context to the AI.
+
+Scale operations support two modes:
+  - "absolute": AI supplies an exact target replica count.
+  - "relative": AI supplies a signed delta ("scale up by 2", "scale down by
+    1"). The current replica count is read from the cluster first, and the
+    final target is computed as current + delta (clamped to [0, 100]).
 """
 
 import json
@@ -63,6 +69,9 @@ DELETE_RESOURCES = {
     "configmap", "secret", "job", "cronjob", "hpa", "pvc",
 }
 READ_RESOURCES = ALLOWED_RESOURCES
+
+MIN_REPLICAS = 0
+MAX_REPLICAS = 100
 
 MAX_PROMPT_CHARS = 4000
 MAX_HISTORY = 40
@@ -166,7 +175,17 @@ Allowed resources:
 
 Rules:
 1. scale is only valid for deployment or statefulset.
-2. scale requires integer replicas from 0 through 100.
+2. scale has two modes:
+   a. ABSOLUTE — the user gives an exact target replica count
+      (e.g. "scale my-app to 5"). Return "mode":"absolute" and an integer
+      "replicas" field from 0 through 100.
+   b. RELATIVE — the user gives a change relative to the current replica
+      count (e.g. "scale up my-app by 1", "scale down my-app by 3",
+      "add 2 replicas to my-app", "remove 1 replica from my-app"). Return
+      "mode":"relative" and an integer "delta" field: positive to scale up,
+      negative to scale down. Do NOT try to compute the resulting replica
+      count yourself — the application resolves the current replica count
+      from the cluster and applies the delta.
 3. restart is valid for deployment, statefulset, or daemonset.
 4. delete is valid only for the supported delete resources.
 5. get, describe, and rollout_status are read/status operations.
@@ -175,18 +194,28 @@ Rules:
 8. Never return more than one operation.
 9. If a request refers to a previous operation, use the operation history below.
 10. If the user says "undo" a previous scale operation, return a scale action
-    using that operation's previous_replica value when it is available. If it
-    is not available, return clarification_required.
-11. If the user says "scale it back", "restore the previous replicas", or
-    similar language, use the most recent applicable scale history entry.
-12. If the user says "again", "repeat that", or similar language, repeat the
-    most recent applicable successful operation when unambiguous.
-13. For "scale up/down" with no numeric target or explicit numeric delta,
+    using that operation's previous_replica value when it is available
+    (mode "absolute", replicas = previous_replicas). If it is not available,
     return clarification_required.
+11. If the user says "scale it back", "restore the previous replicas", or
+    similar language, use the most recent applicable scale history entry
+    (mode "absolute", replicas = previous_replicas from that entry).
+12. If the user says "again", "repeat that", or similar language, repeat the
+    most recent applicable successful operation when unambiguous (preserve
+    its mode: absolute replicas or relative delta).
+13. For "scale up/down" with NO numeric target and NO numeric delta at all,
+    return clarification_required. If a numeric delta is given (e.g. "by 2",
+    "by one"), use mode "relative" instead of asking for clarification.
 14. If the request is unsupported, return unsupported.
 
-Valid normal response example:
-{{"action":"scale","resource":"deployment","name":"my-app","namespace":"test-cc","replicas":5}}
+Valid absolute-scale response example:
+{{"action":"scale","resource":"deployment","name":"my-app","namespace":"test-cc","mode":"absolute","replicas":5}}
+
+Valid relative-scale response example (scale up by 2):
+{{"action":"scale","resource":"deployment","name":"my-app","namespace":"test-cc","mode":"relative","delta":2}}
+
+Valid relative-scale response example (scale down by 1):
+{{"action":"scale","resource":"deployment","name":"my-app","namespace":"test-cc","mode":"relative","delta":-1}}
 
 Clarification example:
 {{"action":"clarification_required","reason":"Please specify the target replica count."}}
@@ -314,11 +343,42 @@ def validate_action(data: dict):
     if action == "scale":
         if resource not in SCALE_RESOURCES:
             raise ValueError(f"Cannot scale Kubernetes resource type: {resource}")
+
+        mode = str(data.get("mode", "")).strip().lower()
+        if not mode:
+            # Backwards-compatible default: a bare "replicas" field with no
+            # mode is treated as an absolute target, matching the previous
+            # (pre-relative-scale) behaviour.
+            mode = "relative" if "delta" in data and "replicas" not in data else "absolute"
+
+        if mode == "relative":
+            try:
+                delta = int(data.get("delta"))
+            except (TypeError, ValueError):
+                raise ValueError("The AI did not provide a valid replica delta.")
+            if delta == 0:
+                raise ValueError("A relative scale delta of 0 has no effect.")
+            if abs(delta) > MAX_REPLICAS:
+                raise ValueError("Replica delta is out of range.")
+
+            return {
+                "kind": "operation",
+                "action": action,
+                "resource": resource,
+                "name": name,
+                "namespace": namespace,
+                "mode": "relative",
+                "delta": delta,
+            }
+
+        if mode != "absolute":
+            raise ValueError(f"AI requested unsupported scale mode: {mode}")
+
         try:
             replicas = int(data.get("replicas"))
         except (TypeError, ValueError):
             raise ValueError("The AI did not provide a valid replica count.")
-        if replicas < 0 or replicas > 100:
+        if replicas < MIN_REPLICAS or replicas > MAX_REPLICAS:
             raise ValueError("Replica count must be between 0 and 100.")
 
         return {
@@ -327,6 +387,7 @@ def validate_action(data: dict):
             "resource": resource,
             "name": name,
             "namespace": namespace,
+            "mode": "absolute",
             "replicas": replicas,
         }
 
@@ -353,6 +414,11 @@ def build_kubectl_command(action: dict) -> str:
     base = f"kubectl -n {namespace}"
 
     if operation == "scale":
+        if "replicas" not in action:
+            raise ValueError(
+                "Cannot build a scale command before the target replica "
+                "count has been resolved."
+            )
         return f"{base} scale {resource}/{name} --replicas={action['replicas']}"
     if operation == "restart":
         return f"{base} rollout restart {resource}/{name}"
@@ -375,6 +441,13 @@ def operation_description(action: dict) -> str:
     namespace = action["namespace"]
 
     if operation == "scale":
+        if action.get("mode") == "relative" and "replicas" not in action:
+            delta = action.get("delta", 0)
+            direction = "up" if delta >= 0 else "down"
+            return (
+                f'Scale {resource} "{name}" in namespace "{namespace}" '
+                f'{direction} by {abs(delta)} replica(s) (relative to current count)'
+            )
         return (
             f'Scale {resource} "{name}" in namespace "{namespace}" '
             f'to {action["replicas"]} replica(s)'
@@ -453,6 +526,7 @@ class K8sAIOpsWidget(QWidget):
 
         examples = QLabel(
             "Examples: scale deployment cowformservice to 5 replicas   •   "
+            "scale up cowformservice by 2   •   scale down cowformservice by 1   •   "
             "scale it back   •   restart deployment cowformservice   •   "
             "repeat that"
         )
@@ -500,6 +574,8 @@ class K8sAIOpsWidget(QWidget):
             "AI Ops is ready.\n\n"
             "Previous operations are remembered and used as context for follow-up requests.\n"
             "Try: scale deployment my-app to 3 replicas\n"
+            "     scale up my-app by 2\n"
+            "     scale down my-app by 1\n"
             "     scale it back\n"
             "     repeat that\n"
         )
@@ -687,17 +763,34 @@ class K8sAIOpsWidget(QWidget):
             self._set_busy(False)
 
     def _execute_action(self, action: dict):
-        command = build_kubectl_command(action)
         description = operation_description(action)
-
-        self.output.append(
-            f'<br><span style="color:{T["ACCENT"]}; font-weight:700;">'
-            f'AI interpreted:</span><br>'
-            f'<span style="color:{T["TEXT_PRIMARY"]}">'
-            f'{self._escape_html(description)}</span><br>'
-            f'<span style="color:{T["TEXT_DIM"]}">'
-            f'Command: {self._escape_html(command)}</span>'
+        is_relative_scale = (
+            action["action"] == "scale" and action.get("mode") == "relative"
         )
+
+        if is_relative_scale:
+            # The exact target replica count is not known yet — it depends on
+            # the current replica count, which is read from the cluster next.
+            self.output.append(
+                f'<br><span style="color:{T["ACCENT"]}; font-weight:700;">'
+                f'AI interpreted:</span><br>'
+                f'<span style="color:{T["TEXT_PRIMARY"]}">'
+                f'{self._escape_html(description)}</span><br>'
+                f'<span style="color:{T["TEXT_DIM"]}">'
+                f'Reading current replica count before applying the change…'
+                f'</span>'
+            )
+            command = None
+        else:
+            command = build_kubectl_command(action)
+            self.output.append(
+                f'<br><span style="color:{T["ACCENT"]}; font-weight:700;">'
+                f'AI interpreted:</span><br>'
+                f'<span style="color:{T["TEXT_PRIMARY"]}">'
+                f'{self._escape_html(description)}</span><br>'
+                f'<span style="color:{T["TEXT_DIM"]}">'
+                f'Command: {self._escape_html(command)}</span>'
+            )
 
         if action["action"] == "delete":
             answer = QMessageBox.question(
@@ -719,7 +812,8 @@ class K8sAIOpsWidget(QWidget):
         if action["action"] == "scale":
             # Capture the replica count before changing it. This makes later
             # requests such as "scale it back" meaningful instead of merely
-            # repeating the new target.
+            # repeating the new target, and it's also what lets relative
+            # ("scale up/down by N") requests compute their target.
             self._pending_scale_action = dict(action)
             self._read_previous_replicas(action, command)
             return
@@ -775,7 +869,40 @@ class K8sAIOpsWidget(QWidget):
         action["previous_replicas"] = previous
         self._pending_scale_action = None
 
-        self._start_kubectl_operation(action, build_kubectl_command(action))
+        if action.get("mode") == "relative":
+            if previous is None:
+                self._write_error(
+                    "\n✗ Could not determine the current replica count, so "
+                    "the relative scale request could not be resolved."
+                )
+                self._set_busy(False)
+                return
+
+            delta = action.get("delta", 0)
+            target = previous + delta
+            clamped = max(MIN_REPLICAS, min(MAX_REPLICAS, target))
+
+            self._write_info(
+                f"\nCurrent replicas: {previous}. "
+                f"Requested change: {'+' if delta >= 0 else ''}{delta}. "
+                f"Target replicas: {clamped}."
+                + (
+                    f" (clamped from {target})"
+                    if clamped != target else ""
+                )
+            )
+
+            action["replicas"] = clamped
+            action.pop("delta", None)
+            action["mode"] = "absolute"
+
+        command = build_kubectl_command(action)
+        self.output.append(
+            f'<span style="color:{T["TEXT_DIM"]}">'
+            f'Command: {self._escape_html(command)}</span>'
+        )
+
+        self._start_kubectl_operation(action, command)
 
     def _on_previous_replicas_error(self, error: str):
         # result() normally carries command failures, but transport-level
@@ -861,9 +988,9 @@ class K8sAIOpsWidget(QWidget):
         }
 
         # For scale history, preserve the value before and after the operation.
-        # The pre-operation replica value can be injected later if the UI has it;
-        # keeping it optional lets the AI use explicit current/previous values
-        # without making history writes fail when the value is unknown.
+        # By the time we get here, relative ("scale up/down by N") requests
+        # have already been resolved to an absolute replica count, so this
+        # always records the concrete before/after values.
         if action.get("action") == "scale":
             row["replicas"] = action.get("replicas")
             if action.get("previous_replicas") is not None:
