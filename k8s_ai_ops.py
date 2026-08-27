@@ -1,0 +1,891 @@
+"""k8s_ai_ops.py — AI-powered Kubernetes command operations.
+
+The AI interprets natural-language Kubernetes requests into a small,
+strictly validated action schema. The AI never supplies an executable
+shell command; this module constructs the kubectl command after validation.
+
+Operation history is persisted through themes.load_settings()/save_settings()
+under the ``k8s_ai_ops_history`` settings key, so recent operations survive
+application restarts and can be supplied as context to the AI.
+"""
+
+import json
+import re
+from datetime import datetime
+
+from PyQt5.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTextBrowser,
+    QMessageBox,
+)
+from PyQt5.QtCore import QThread, pyqtSignal
+
+import ai_assist
+from themes import T, load_settings, save_settings
+from workers import CommandWorker, track_worker
+from utils import monospace_font
+
+
+ALLOWED_ACTIONS = {
+    "scale",
+    "restart",
+    "delete",
+    "get",
+    "describe",
+    "rollout_status",
+}
+
+ALLOWED_RESOURCES = {
+    "deployment",
+    "statefulset",
+    "daemonset",
+    "pod",
+    "service",
+    "ingress",
+    "configmap",
+    "secret",
+    "job",
+    "cronjob",
+    "hpa",
+    "pvc",
+    "pv",
+}
+
+SCALE_RESOURCES = {"deployment", "statefulset"}
+RESTART_RESOURCES = {"deployment", "statefulset", "daemonset"}
+DELETE_RESOURCES = {
+    "pod", "deployment", "statefulset", "daemonset", "service", "ingress",
+    "configmap", "secret", "job", "cronjob", "hpa", "pvc",
+}
+READ_RESOURCES = ALLOWED_RESOURCES
+
+MAX_PROMPT_CHARS = 4000
+MAX_HISTORY = 40
+HISTORY_CONTEXT_ITEMS = 12
+
+
+# ---------------------------------------------------------------------------
+# Persistent operation history
+# ---------------------------------------------------------------------------
+
+def _load_history() -> list:
+    try:
+        rows = load_settings().get("k8s_ai_ops_history", [])
+        if not isinstance(rows, list):
+            return []
+
+        cleaned = []
+        for row in rows[-MAX_HISTORY:]:
+            if not isinstance(row, dict):
+                continue
+            if not row.get("action") or not row.get("resource") or not row.get("name"):
+                continue
+            cleaned.append(row)
+        return cleaned
+    except Exception:
+        return []
+
+
+def _save_history(history: list):
+    try:
+        save_settings(k8s_ai_ops_history=history[-MAX_HISTORY:])
+    except Exception:
+        # History should never break Kubernetes operations if settings cannot
+        # be persisted for any reason.
+        pass
+
+
+def _history_text(history: list, limit: int = HISTORY_CONTEXT_ITEMS) -> str:
+    rows = history[-limit:]
+    if not rows:
+        return "No previous AI Ops operations are recorded."
+
+    lines = []
+    for idx, row in enumerate(rows, 1):
+        status = row.get("status", "unknown")
+        action = row.get("action", "")
+        resource = row.get("resource", "")
+        name = row.get("name", "")
+        namespace = row.get("namespace", "default")
+        timestamp = row.get("timestamp", "")
+        replicas = row.get("replicas")
+
+        detail = f"{action} {resource}/{name} in namespace {namespace}"
+        if replicas is not None:
+            detail += f" replicas={replicas}"
+        if row.get("previous_replicas") is not None:
+            detail += f" previous_replicas={row['previous_replicas']}"
+
+        lines.append(
+            f"{idx}. [{status}] {detail}"
+            + (f" at {timestamp}" if timestamp else "")
+        )
+
+    return "\n".join(lines)
+
+
+def _build_k8s_ops_prompt(user_request: str, namespace: str, context: str, history: list) -> str:
+    return f"""
+You are a Kubernetes operations command interpreter.
+
+Convert the user's natural-language request into EXACTLY ONE safe,
+allow-listed Kubernetes operation represented as JSON.
+
+You MUST NOT return a shell command.
+You MUST NOT return kubectl arguments.
+You MUST NOT return Markdown.
+You MUST NOT return explanations outside the JSON object.
+
+Allowed actions:
+- scale
+- restart
+- delete
+- get
+- describe
+- rollout_status
+
+Allowed resources:
+- deployment
+- statefulset
+- daemonset
+- pod
+- service
+- ingress
+- configmap
+- secret
+- job
+- cronjob
+- hpa
+- pvc
+- pv
+
+Rules:
+1. scale is only valid for deployment or statefulset.
+2. scale requires integer replicas from 0 through 100.
+3. restart is valid for deployment, statefulset, or daemonset.
+4. delete is valid only for the supported delete resources.
+5. get, describe, and rollout_status are read/status operations.
+6. Never invent a resource name.
+7. Use the selected namespace unless the user explicitly specifies another.
+8. Never return more than one operation.
+9. If a request refers to a previous operation, use the operation history below.
+10. If the user says "undo" a previous scale operation, return a scale action
+    using that operation's previous_replica value when it is available. If it
+    is not available, return clarification_required.
+11. If the user says "scale it back", "restore the previous replicas", or
+    similar language, use the most recent applicable scale history entry.
+12. If the user says "again", "repeat that", or similar language, repeat the
+    most recent applicable successful operation when unambiguous.
+13. For "scale up/down" with no numeric target or explicit numeric delta,
+    return clarification_required.
+14. If the request is unsupported, return unsupported.
+
+Valid normal response example:
+{{"action":"scale","resource":"deployment","name":"my-app","namespace":"test-cc","replicas":5}}
+
+Clarification example:
+{{"action":"clarification_required","reason":"Please specify the target replica count."}}
+
+Unsupported example:
+{{"action":"unsupported","reason":"This Kubernetes operation is not supported by AI Ops."}}
+
+Current selected namespace:
+{namespace}
+
+Current UI context:
+{context}
+
+Previous AI Ops history:
+{_history_text(history)}
+
+User request:
+{user_request}
+""".strip()
+
+
+class K8sAIInterpretWorker(QThread):
+    """Ask the configured AI provider to interpret one Kubernetes request."""
+
+    done = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, provider, api_key, model, request_text, namespace, context, history, parent=None):
+        super().__init__(parent)
+        self._provider = provider
+        self._api_key = api_key
+        self._model = model
+        self._request_text = request_text
+        self._namespace = namespace
+        self._context = context
+        self._history = history
+        self.finished.connect(self.deleteLater)
+
+    def run(self):
+        prompt = _build_k8s_ops_prompt(
+            self._request_text,
+            self._namespace,
+            self._context,
+            self._history,
+        )
+        text, err = ai_assist._call_provider(
+            self._provider,
+            self._api_key,
+            self._model,
+            prompt,
+        )
+        if err:
+            self.error.emit(err)
+        else:
+            self.done.emit(text)
+
+
+def _extract_json(text: str):
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("The AI returned an empty response.")
+
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("The AI response was not valid JSON.")
+
+
+def validate_action(data: dict):
+    if not isinstance(data, dict):
+        raise ValueError("The AI returned an invalid operation object.")
+
+    action = str(data.get("action", "")).strip().lower()
+
+    if action == "clarification_required":
+        return {
+            "kind": "clarification",
+            "reason": str(data.get(
+                "reason",
+                "Please provide more details about the Kubernetes operation.",
+            )).strip(),
+        }
+
+    if action == "unsupported":
+        return {
+            "kind": "unsupported",
+            "reason": str(data.get(
+                "reason",
+                "This Kubernetes operation is not supported.",
+            )).strip(),
+        }
+
+    if action not in ALLOWED_ACTIONS:
+        raise ValueError(f"AI requested unsupported action: {action or '(missing)'}")
+
+    resource = str(data.get("resource", "")).strip().lower()
+    name = str(data.get("name", "")).strip()
+    namespace = str(data.get("namespace", "")).strip() or "default"
+
+    if resource not in ALLOWED_RESOURCES:
+        raise ValueError(
+            f"AI requested unsupported Kubernetes resource: {resource or '(missing)'}"
+        )
+    if not name:
+        raise ValueError("The AI did not provide a Kubernetes resource name.")
+
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?", name, flags=re.IGNORECASE):
+        raise ValueError(f"Invalid Kubernetes resource name returned by AI: {name}")
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", namespace, flags=re.IGNORECASE):
+        raise ValueError(f"Invalid Kubernetes namespace returned by AI: {namespace}")
+
+    if action == "scale":
+        if resource not in SCALE_RESOURCES:
+            raise ValueError(f"Cannot scale Kubernetes resource type: {resource}")
+        try:
+            replicas = int(data.get("replicas"))
+        except (TypeError, ValueError):
+            raise ValueError("The AI did not provide a valid replica count.")
+        if replicas < 0 or replicas > 100:
+            raise ValueError("Replica count must be between 0 and 100.")
+
+        return {
+            "kind": "operation",
+            "action": action,
+            "resource": resource,
+            "name": name,
+            "namespace": namespace,
+            "replicas": replicas,
+        }
+
+    if action == "restart" and resource not in RESTART_RESOURCES:
+        raise ValueError(f"Cannot restart Kubernetes resource type: {resource}")
+
+    if action == "delete" and resource not in DELETE_RESOURCES:
+        raise ValueError(f"Cannot delete Kubernetes resource type: {resource}")
+
+    return {
+        "kind": "operation",
+        "action": action,
+        "resource": resource,
+        "name": name,
+        "namespace": namespace,
+    }
+
+
+def build_kubectl_command(action: dict) -> str:
+    operation = action["action"]
+    resource = action["resource"]
+    name = action["name"]
+    namespace = action["namespace"]
+    base = f"kubectl -n {namespace}"
+
+    if operation == "scale":
+        return f"{base} scale {resource}/{name} --replicas={action['replicas']}"
+    if operation == "restart":
+        return f"{base} rollout restart {resource}/{name}"
+    if operation == "delete":
+        return f"{base} delete {resource}/{name}"
+    if operation == "get":
+        return f"{base} get {resource}/{name}"
+    if operation == "describe":
+        return f"{base} describe {resource}/{name}"
+    if operation == "rollout_status":
+        return f"{base} rollout status {resource}/{name}"
+
+    raise ValueError(f"Unsupported operation: {operation}")
+
+
+def operation_description(action: dict) -> str:
+    operation = action["action"]
+    resource = action["resource"]
+    name = action["name"]
+    namespace = action["namespace"]
+
+    if operation == "scale":
+        return (
+            f'Scale {resource} "{name}" in namespace "{namespace}" '
+            f'to {action["replicas"]} replica(s)'
+        )
+    if operation == "restart":
+        return f'Restart {resource} "{name}" in namespace "{namespace}"'
+    if operation == "delete":
+        return f'Delete {resource} "{name}" in namespace "{namespace}"'
+    if operation == "get":
+        return f'Get {resource} "{name}" in namespace "{namespace}"'
+    if operation == "describe":
+        return f'Describe {resource} "{name}" in namespace "{namespace}"'
+    if operation == "rollout_status":
+        return (
+            f'Check rollout status of {resource} "{name}" '
+            f'in namespace "{namespace}"'
+        )
+    return f"{operation} {resource}/{name}"
+
+
+class K8sAIOpsWidget(QWidget):
+    """Natural-language Kubernetes operations panel with persistent history."""
+
+    operation_finished = pyqtSignal()
+
+    def __init__(self, ssh=None, namespace_getter=None, context_getter=None, parent=None):
+        super().__init__(parent)
+        self.ssh = ssh
+        self._namespace_getter = namespace_getter
+        self._context_getter = context_getter
+        self._workers = []
+        self._ai_worker = None
+        self._operation_worker = None
+        self._scale_previous_worker = None
+        self._pending_scale_action = None
+        self._busy = False
+        self._history = _load_history()
+        self._build_ui()
+
+    def set_ssh(self, ssh):
+        self.ssh = ssh
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        title_row = QHBoxLayout()
+        title = QLabel("✨  AI Kubernetes Operations")
+        title.setStyleSheet(
+            f"color: {T['TEXT_PRIMARY']}; font-size: 16px; font-weight: 700;"
+        )
+        title_row.addWidget(title)
+        title_row.addStretch()
+
+        self.history_lbl = QLabel()
+        self.history_lbl.setStyleSheet(
+            f"color: {T['TEXT_MUTED']}; font-size: 11px;"
+        )
+        title_row.addWidget(self.history_lbl)
+
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setStyleSheet(
+            f"color: {T['TEXT_MUTED']}; font-size: 12px;"
+        )
+        title_row.addWidget(self.status_lbl)
+        root.addLayout(title_row)
+
+        description = QLabel(
+            "Describe a Kubernetes operation in plain English. Previous AI Ops "
+            "operations are remembered across app restarts."
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        root.addWidget(description)
+
+        examples = QLabel(
+            "Examples: scale deployment cowformservice to 5 replicas   •   "
+            "scale it back   •   restart deployment cowformservice   •   "
+            "repeat that"
+        )
+        examples.setWordWrap(True)
+        examples.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px;")
+        root.addWidget(examples)
+
+        self.request_input = QLineEdit()
+        self.request_input.setPlaceholderText(
+            "Ask AI to perform a Kubernetes operation…"
+        )
+        self.request_input.returnPressed.connect(self._submit)
+        root.addWidget(self.request_input)
+
+        btn_row = QHBoxLayout()
+        self.run_btn = QPushButton("✨  Run with AI")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.setFixedHeight(34)
+        self.run_btn.clicked.connect(self._submit)
+        btn_row.addWidget(self.run_btn)
+
+        clear_btn = QPushButton("Clear Output")
+        clear_btn.setFixedHeight(34)
+        clear_btn.clicked.connect(self._clear_output)
+        btn_row.addWidget(clear_btn)
+
+        self.clear_history_btn = QPushButton("Clear History")
+        self.clear_history_btn.setFixedHeight(34)
+        self.clear_history_btn.clicked.connect(self._clear_history)
+        btn_row.addWidget(self.clear_history_btn)
+        btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        self.output = QTextBrowser()
+        self.output.setOpenExternalLinks(False)
+        self.output.setFont(monospace_font(11))
+        self.output.setStyleSheet(
+            f"background: {T['BG_DARK']}; color: {T['TEXT_PRIMARY']}; "
+            f"border: 1px solid {T['BORDER']}; border-radius: 8px; padding: 12px;"
+        )
+        root.addWidget(self.output, 1)
+
+        self._update_history_label()
+        self._write_info(
+            "AI Ops is ready.\n\n"
+            "Previous operations are remembered and used as context for follow-up requests.\n"
+            "Try: scale deployment my-app to 3 replicas\n"
+            "     scale it back\n"
+            "     repeat that\n"
+        )
+
+    def _namespace(self) -> str:
+        if self._namespace_getter:
+            try:
+                value = self._namespace_getter()
+                return str(value or "default").strip() or "default"
+            except Exception:
+                pass
+        return "default"
+
+    def _context(self) -> str:
+        if self._context_getter:
+            try:
+                value = self._context_getter()
+                return str(value or "").strip()
+            except Exception:
+                pass
+        return ""
+
+    def _update_history_label(self):
+        count = len(self._history)
+        self.history_lbl.setText(
+            f"{count} saved operation{'s' if count != 1 else ''}"
+        )
+
+    def _write_info(self, text: str):
+        self.output.append(
+            f'<span style="color:{T["TEXT_DIM"]}">'
+            f'{self._escape_html(text).replace(chr(10), "<br>")}'
+            f'</span>'
+        )
+
+    def _write_success(self, text: str):
+        self.output.append(
+            f'<span style="color:{T["SUCCESS"]}">'
+            f'{self._escape_html(text).replace(chr(10), "<br>")}'
+            f'</span>'
+        )
+
+    def _write_error(self, text: str):
+        self.output.append(
+            f'<span style="color:{T["DANGER"]}">'
+            f'{self._escape_html(text).replace(chr(10), "<br>")}'
+            f'</span>'
+        )
+
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        self.request_input.setEnabled(not busy)
+        self.run_btn.setEnabled(not busy)
+        self.clear_history_btn.setEnabled(not busy)
+        if busy:
+            self.run_btn.setText("✨  Thinking…")
+            self.status_lbl.setText("AI is interpreting…")
+        else:
+            self.run_btn.setText("✨  Run with AI")
+            self.status_lbl.setText("Ready")
+
+    def _clear_output(self):
+        if self._busy:
+            return
+        self.output.clear()
+        self._write_info("AI Ops is ready.")
+
+    def _clear_history(self):
+        if self._busy:
+            return
+
+        if not self._history:
+            self._update_history_label()
+            self._write_info("\nNo saved operation history to clear.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Clear AI Ops History",
+            "Delete the saved AI Kubernetes operation history?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self._history = []
+        _save_history(self._history)
+        self._update_history_label()
+        self._write_info("\n✓ AI Ops history cleared.")
+
+    def _submit(self):
+        if self._busy:
+            return
+
+        if not self.ssh:
+            self._write_error("No Kubernetes SSH connection is active.")
+            return
+
+        request = self.request_input.text().strip()
+        if not request:
+            return
+        if len(request) > MAX_PROMPT_CHARS:
+            self._write_error(
+                f"Request is too long. Maximum is {MAX_PROMPT_CHARS} characters."
+            )
+            return
+
+        provider = ai_assist.get_provider()
+        api_key = ai_assist.get_api_key(provider)
+        if not api_key:
+            label = ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
+            QMessageBox.information(
+                self,
+                "No API key set",
+                f"Add a {label} API key in Settings → 🤖 AI to use AI Kubernetes Operations.",
+            )
+            return
+
+        namespace = self._namespace()
+        context = self._context()
+
+        self.output.append(
+            f'<br><span style="color:{T["ACCENT2"]}">$ '
+            f'{self._escape_html(request)}</span>'
+        )
+        self.output.append(
+            f'<span style="color:{T["TEXT_MUTED"]}">'
+            f'Namespace: {self._escape_html(namespace)}</span>'
+        )
+
+        self._set_busy(True)
+
+        worker = K8sAIInterpretWorker(
+            provider,
+            api_key,
+            ai_assist.get_model(provider),
+            request,
+            namespace,
+            context,
+            list(self._history),
+        )
+        worker.done.connect(self._on_ai_done)
+        worker.error.connect(self._on_ai_error)
+        worker.finished.connect(self._on_ai_finished)
+        self._ai_worker = worker
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _on_ai_done(self, text: str):
+        try:
+            raw_action = _extract_json(text)
+            action = validate_action(raw_action)
+        except Exception as exc:
+            self._write_error(f"AI interpretation failed: {exc}")
+            return
+
+        if action["kind"] == "clarification":
+            self._write_info("\nAI needs more information:\n" + action["reason"])
+            self.request_input.setFocus()
+            return
+
+        if action["kind"] == "unsupported":
+            self._write_error("\n" + action["reason"])
+            return
+
+        self._execute_action(action)
+
+    def _on_ai_error(self, message: str):
+        self._write_error(f"\nAI error:\n{message}")
+
+    def _on_ai_finished(self):
+        self._ai_worker = None
+        if self._operation_worker is None:
+            self._set_busy(False)
+
+    def _execute_action(self, action: dict):
+        command = build_kubectl_command(action)
+        description = operation_description(action)
+
+        self.output.append(
+            f'<br><span style="color:{T["ACCENT"]}; font-weight:700;">'
+            f'AI interpreted:</span><br>'
+            f'<span style="color:{T["TEXT_PRIMARY"]}">'
+            f'{self._escape_html(description)}</span><br>'
+            f'<span style="color:{T["TEXT_DIM"]}">'
+            f'Command: {self._escape_html(command)}</span>'
+        )
+
+        if action["action"] == "delete":
+            answer = QMessageBox.question(
+                self,
+                "Confirm Kubernetes Delete",
+                (
+                    f"{description}\n\n"
+                    "This operation will modify the cluster.\n"
+                    "Do you want to continue?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._write_info("\nOperation cancelled.")
+                self._set_busy(False)
+                return
+
+        if action["action"] == "scale":
+            # Capture the replica count before changing it. This makes later
+            # requests such as "scale it back" meaningful instead of merely
+            # repeating the new target.
+            self._pending_scale_action = dict(action)
+            self._read_previous_replicas(action, command)
+            return
+
+        self._start_kubectl_operation(action, command)
+
+    def _read_previous_replicas(self, action: dict, command: str):
+        resource = action["resource"]
+        name = action["name"]
+        namespace = action["namespace"]
+
+        probe = (
+            f"kubectl -n {namespace} get {resource}/{name} "
+            f"-o jsonpath={{.spec.replicas}}"
+        )
+
+        self.status_lbl.setText("Reading current replicas…")
+        worker = CommandWorker(self.ssh, probe)
+        self._scale_previous_worker = worker
+        worker._k8s_probe_action = action
+        worker.result.connect(self._on_previous_replicas_result)
+        worker.error.connect(
+            lambda error: self._on_previous_replicas_error(error)
+        )
+        worker.finished.connect(
+            lambda: setattr(self, "_scale_previous_worker", None)
+        )
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _on_previous_replicas_result(self, output: str, err: str, exit_code: int):
+        action = self._pending_scale_action
+        if action is None:
+            return
+
+        if exit_code != 0:
+            self._pending_scale_action = None
+            self._write_error(
+                "\n✗ Could not read the current replica count, so the scale "
+                "operation was not executed.\n"
+                + ((err or output or "Unknown error").strip())
+            )
+            self._set_busy(False)
+            return
+
+        raw = (output or "").strip()
+        try:
+            previous = int(raw)
+        except (TypeError, ValueError):
+            previous = None
+
+        action = dict(action)
+        action["previous_replicas"] = previous
+        self._pending_scale_action = None
+
+        self._start_kubectl_operation(action, build_kubectl_command(action))
+
+    def _on_previous_replicas_error(self, error: str):
+        # result() normally carries command failures, but transport-level
+        # errors still arrive here. Do not execute the mutating scale.
+        if self._pending_scale_action is None:
+            return
+        self._pending_scale_action = None
+        self._write_error(
+            "\n✗ Could not read the current replica count, so the scale "
+            "operation was not executed.\n" + str(error)
+        )
+        self._set_busy(False)
+
+    def _start_kubectl_operation(self, action: dict, command: str):
+        self.status_lbl.setText("Executing kubectl…")
+
+        worker = CommandWorker(self.ssh, command + " 2>&1")
+        worker._k8s_action = action
+        worker._k8s_command = command
+        self._operation_worker = worker
+        worker.result.connect(
+            lambda output, err, exit_code, a=action, c=command:
+                self._on_operation_result(a, c, output, err, exit_code)
+        )
+        worker.error.connect(self._on_operation_error)
+        worker.finished.connect(self._on_operation_finished)
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _on_operation_result(
+        self,
+        action: dict,
+        command: str,
+        output: str,
+        err: str,
+        exit_code: int,
+    ):
+        output = (output or "").strip()
+        error_text = (err or "").strip()
+
+        if output:
+            self.output.append(
+                f'<br><span style="color:{T["TEXT_DIM"]}">kubectl output:</span><br>'
+                f'<span style="color:{T["TEXT_PRIMARY"]}">'
+                f'{self._escape_html(output).replace(chr(10), "<br>")}'
+                f'</span>'
+            )
+
+        if exit_code != 0 or error_text:
+            combined = error_text or output or "kubectl returned a non-zero exit code."
+            self._remember_operation(action, command, "failed", combined)
+            self._write_error(
+                f"\n✗ Kubernetes operation failed (exit code {exit_code}):\n{combined}"
+            )
+            return
+
+        self._remember_operation(action, command, "success", output)
+        self._write_success("\n✓ Kubernetes operation completed successfully.")
+        self.operation_finished.emit()
+
+    def _on_operation_error(self, error: str):
+        self._write_error("\n✗ Kubernetes operation failed:\n" + str(error))
+
+        if self._operation_worker is not None:
+            action = getattr(self._operation_worker, "_k8s_action", None)
+            command = getattr(self._operation_worker, "_k8s_command", "")
+            if action:
+                self._remember_operation(action, command, "failed", str(error))
+
+    def _on_operation_finished(self):
+        self._operation_worker = None
+        self._set_busy(False)
+
+    def _remember_operation(self, action: dict, command: str, status: str, output: str):
+        row = {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "status": status,
+            "action": action.get("action"),
+            "resource": action.get("resource"),
+            "name": action.get("name"),
+            "namespace": action.get("namespace", "default"),
+            "command": command,
+        }
+
+        # For scale history, preserve the value before and after the operation.
+        # The pre-operation replica value can be injected later if the UI has it;
+        # keeping it optional lets the AI use explicit current/previous values
+        # without making history writes fail when the value is unknown.
+        if action.get("action") == "scale":
+            row["replicas"] = action.get("replicas")
+            if action.get("previous_replicas") is not None:
+                row["previous_replicas"] = action.get("previous_replicas")
+
+        if output:
+            row["output"] = output[-1000:]
+
+        self._history.append(row)
+        self._history = self._history[-MAX_HISTORY:]
+        _save_history(self._history)
+        self._update_history_label()
+
+    def closeEvent(self, event):
+        if self._ai_worker is not None:
+            try:
+                self._ai_worker.quit()
+            except Exception:
+                pass
+        if self._operation_worker is not None:
+            try:
+                self._operation_worker.quit()
+            except Exception:
+                pass
+        super().closeEvent(event)

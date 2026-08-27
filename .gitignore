@@ -4,3 +4,4 @@ dist/
 EC2 Manager.spec
 .gitignore
 tunnel-restart.sh
+__pycache__

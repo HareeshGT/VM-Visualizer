@@ -26,6 +26,7 @@ from dialogs import (
     ContainerPickerDialog, AIExplainDialog,
 )
 import ai_assist
+from k8s_ai_ops import K8sAIOpsWidget
 from k8s_cards import (
     PodCardWidget, DeploymentCardWidget, ConfigCardWidget,
     ServiceCardWidget, IngressCardWidget,
@@ -116,6 +117,8 @@ class KubernetesTab(QWidget):
     # ── SSH wiring ────────────────────────────────────────────
     def set_ssh(self, ssh):
         self.ssh = ssh
+        if hasattr(self, "k8s_ai_ops"):
+            self.k8s_ai_ops.set_ssh(ssh)
 
         if ssh:
             self._load_namespaces()
@@ -236,6 +239,7 @@ class KubernetesTab(QWidget):
         self._build_events_tab()
         self._build_tunnels_tab()
         self._build_terminal_tab()
+        self._build_ai_ops_tab()
 
     def _vline(self):
         f = QFrame()
@@ -710,6 +714,103 @@ class KubernetesTab(QWidget):
         )
         lay.addWidget(self.ing_list)
         self.sub_tabs.addTab(w, "🌐  Ingress")
+
+
+    def _build_ai_ops_tab(self):
+        """Natural-language Kubernetes operations powered by AI."""
+
+        w = QWidget()
+
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.k8s_ai_ops = K8sAIOpsWidget(
+            ssh=self.ssh,
+            namespace_getter=lambda: self._current_ns,
+            context_getter=self._ai_ops_context,
+            parent=w,
+        )
+
+        self.k8s_ai_ops.operation_finished.connect(
+            self._on_ai_ops_operation_finished
+        )
+
+        lay.addWidget(self.k8s_ai_ops)
+
+        self.sub_tabs.addTab(
+            w,
+            "✨  AI Ops",
+        )
+
+    def _ai_ops_context(self):
+        """Give AI Ops a small amount of useful UI context.
+
+        The AI still has to identify the resource explicitly unless the user
+        gives enough information. This context is only there to improve
+        interpretation.
+        """
+
+        parts = []
+
+        # Current namespace.
+        parts.append(
+            f"Selected namespace: {self._current_ns or 'default'}"
+        )
+
+        # Selected deployment, if any.
+        try:
+            item = self.deploy_list.currentItem()
+
+            if item is not None:
+                meta = item.data(Qt.UserRole) or {}
+
+                name = meta.get("name")
+                namespace = meta.get("namespace")
+
+                if name:
+                    parts.append(
+                        f"Selected deployment: {name}"
+                    )
+
+                if namespace:
+                    parts.append(
+                        f"Selected deployment namespace: {namespace}"
+                    )
+        except Exception:
+            pass
+
+        # Selected pod, if any.
+        try:
+            item = self.pod_list.currentItem()
+
+            if item is not None:
+                meta = item.data(Qt.UserRole) or {}
+
+                name = meta.get("name")
+                namespace = meta.get("namespace")
+
+                if name:
+                    parts.append(
+                        f"Selected pod: {name}"
+                    )
+
+                if namespace:
+                    parts.append(
+                        f"Selected pod namespace: {namespace}"
+                    )
+        except Exception:
+            pass
+
+        return "\n".join(parts)
+
+    def _on_ai_ops_operation_finished(self):
+        """Refresh the visible Kubernetes resource list after an AI operation."""
+
+        try:
+            self._refresh_current_tab()
+        except Exception:
+            pass
 
     # ── Jobs & CronJobs ───────────────────────────────────────
     def _build_jobs_tab(self):
