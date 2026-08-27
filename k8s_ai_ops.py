@@ -259,6 +259,128 @@ User request:
 """.strip()
 
 
+# ---------------------------------------------------------------------------
+# Local/general questions
+# ---------------------------------------------------------------------------
+
+def _general_question_response(request: str):
+    """Answer simple conversational questions locally.
+
+    These responses do not call the AI provider and do not create Kubernetes
+    operations. Return None when the request is not a supported general query.
+    """
+
+    normalized = re.sub(r"\s+", " ", (request or "").strip().lower())
+    if not normalized:
+        return None
+
+    # Remove common punctuation so matching is tolerant of voice
+    # transcription variations.
+    clean = re.sub(r"[?!.,:;]+", "", normalized).strip()
+
+    # "Am I audible?" / microphone hearing checks.
+    audible_phrases = (
+        "am i audible",
+        "can you hear me",
+        "can you hear me clearly",
+        "do you hear me",
+        "is my voice audible",
+        "is my mic working",
+        "is my microphone working",
+        "can you hear my voice",
+    )
+    if any(phrase in clean for phrase in audible_phrases):
+        return (
+            "Yes — I can hear you. Your voice was captured and "
+            "transcribed successfully."
+        )
+
+    # Current local date/time. This uses the computer's local timezone.
+    if clean in {
+        "what time is it",
+        "whats the time",
+        "what is the time",
+        "current time",
+        "time now",
+        "tell me the time",
+        "what time",
+    }:
+        now = datetime.now().astimezone()
+        return f"The current time is {now.strftime('%I:%M %p %Z')}."
+
+    if clean in {
+        "what date is it",
+        "whats the date",
+        "what is the date",
+        "current date",
+        "today's date",
+        "todays date",
+        "what day is it",
+        "what is today",
+    }:
+        now = datetime.now().astimezone()
+        return f"Today is {now.strftime('%A, %d %B %Y')}."
+
+    if clean in {
+        "who are you",
+        "what are you",
+        "what is your name",
+    }:
+        return (
+            "I'm the Kubernetes AI Ops assistant. I can interpret "
+            "Kubernetes requests and run approved operations."
+        )
+
+    if clean in {
+        "hello",
+        "hi",
+        "hey",
+        "hello there",
+        "hi there",
+    }:
+        return "Hello! Tell me what you want to do in Kubernetes."
+
+    if clean in {
+        "thanks",
+        "thank you",
+        "thank you very much",
+    }:
+        return "You're welcome."
+
+    if clean in {
+        "help",
+        "what can you do",
+        "what can i ask",
+        "what do you support",
+    }:
+        return (
+            "I can scale, restart, delete, inspect, describe, and check "
+            "rollout status for supported Kubernetes resources. "
+            "You can also use voice commands."
+        )
+
+    if clean in {
+        "what namespace am i in",
+        "which namespace am i in",
+        "current namespace",
+        "what is the current namespace",
+        "which namespace is selected",
+    }:
+        return None  # Filled by the widget using its current namespace.
+
+    if clean in {
+        "what does rtc mean",
+        "what is rtc",
+        "define rtc",
+    }:
+        return (
+            "RTC commonly means Real-Time Clock — a clock that keeps track "
+            "of the current date and time, even when a device is powered off."
+        )
+
+    return None
+
+
 class K8sAIInterpretWorker(QThread):
     """Ask the configured AI provider to interpret one Kubernetes request."""
 
@@ -1341,6 +1463,41 @@ class K8sAIOpsWidget(QWidget):
             self._write_error(
                 f"Request is too long. Maximum is {MAX_PROMPT_CHARS} characters."
             )
+            return
+
+        # Handle simple conversational/status questions locally so they do
+        # not consume an AI request and can work without Kubernetes intent
+        # parsing.
+        local_response = _general_question_response(request)
+
+        clean_request = re.sub(
+            r"\s+",
+            " ",
+            request.strip().lower(),
+        )
+        clean_request = re.sub(r"[?!.,:;]+", "", clean_request).strip()
+
+        if clean_request in {
+            "what namespace am i in",
+            "which namespace am i in",
+            "current namespace",
+            "what is the current namespace",
+            "which namespace is selected",
+        }:
+            local_response = (
+                f"The currently selected namespace is "
+                f"{self._namespace()}."
+            )
+
+        if local_response is not None:
+            self.output.append(
+                f'<br><span style="color:{T["ACCENT"]}; font-weight:700;">'
+                f'Assistant:</span><br>'
+                f'<span style="color:{T["TEXT_PRIMARY"]}">'
+                f'{self._escape_html(local_response)}'
+                f'</span>'
+            )
+            self.status_lbl.setText("Ready")
             return
 
         provider = ai_assist.get_provider()
