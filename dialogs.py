@@ -893,7 +893,7 @@ class ExecDialog(QDialog):
         self._cwd       = None
         self._workers   = []
 
-        # State for the "Explain error" AI feature — the last command run
+        # State for the "Analyze with AI" AI feature — the last command run
         # (not counting `cd`, which has its own distinct failure message
         # already) plus its exit code and raw stdout/stderr, so a click on
         # the button doesn't need to re-derive any of that from the
@@ -934,7 +934,7 @@ class ExecDialog(QDialog):
         run_btn.clicked.connect(self._run)
         inp_row.addWidget(run_btn)
 
-        self.explain_btn = QPushButton("✨  Explain error")
+        self.explain_btn = QPushButton("✨  Analyze with AI")
         self.explain_btn.setToolTip("Ask AI to diagnose the last failed command")
         self.explain_btn.setEnabled(False)
         self.explain_btn.clicked.connect(self._on_explain)
@@ -1039,7 +1039,7 @@ class ExecDialog(QDialog):
     def _on_explain_finished(self):
         self._ai_worker = None
         self.explain_btn.setEnabled(True)
-        self.explain_btn.setText("✨  Explain error")
+        self.explain_btn.setText("✨  Analyze with AI")
 
     def closeEvent(self, event):
         if self._ai_worker is not None:

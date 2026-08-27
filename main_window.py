@@ -96,7 +96,7 @@ class EC2FileManager(QMainWindow):
         self._conn_pem     = None  # type: Optional[str]
         self._conn_password = None  # type: Optional[str]
         self._terminal_cwd = None  # type: Optional[str]
-        # "Explain error" AI feature state for the plain SSH terminal —
+        # "Analyze with AI" AI feature state for the plain SSH terminal —
         # mirrors ExecDialog's equivalent state (see dialogs.py).
         self._last_term_cmd       = None
         self._last_term_stdout    = ""
