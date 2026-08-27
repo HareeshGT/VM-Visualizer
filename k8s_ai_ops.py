@@ -263,120 +263,248 @@ User request:
 # Local/general questions
 # ---------------------------------------------------------------------------
 
-def _general_question_response(request: str):
-    """Answer simple conversational questions locally.
+def _general_question_response(request: str, namespace: str = None):
+    """Answer common conversational/system questions locally.
 
     These responses do not call the AI provider and do not create Kubernetes
-    operations. Return None when the request is not a supported general query.
+    operations. Return None when the request should continue through the
+    Kubernetes AI interpreter.
     """
 
     normalized = re.sub(r"\s+", " ", (request or "").strip().lower())
     if not normalized:
         return None
 
-    # Remove common punctuation so matching is tolerant of voice
-    # transcription variations.
+    # Normalize punctuation and a few common speech-to-text contractions.
     clean = re.sub(r"[?!.,:;]+", "", normalized).strip()
+    clean = clean.replace("how's", "how is")
+    clean = clean.replace("what's", "what is")
+    clean = clean.replace("where's", "where is")
+    clean = clean.replace("who's", "who is")
 
-    # "Am I audible?" / microphone hearing checks.
-    audible_phrases = (
+    # --------------------------------------------------
+    # Audible / microphone checks
+    # --------------------------------------------------
+
+    audible_patterns = (
         "am i audible",
         "can you hear me",
         "can you hear me clearly",
+        "can you hear my voice",
         "do you hear me",
         "is my voice audible",
         "is my mic working",
         "is my microphone working",
-        "can you hear my voice",
+        "is microphone working",
+        "is the microphone working",
+        "can you hear what i am saying",
+        "can you hear what im saying",
     )
-    if any(phrase in clean for phrase in audible_phrases):
+
+    if any(phrase in clean for phrase in audible_patterns):
         return (
             "Yes — I can hear you. Your voice was captured and "
             "transcribed successfully."
         )
 
-    # Current local date/time. This uses the computer's local timezone.
-    if clean in {
+    # --------------------------------------------------
+    # Combined greetings / conversational questions
+    # --------------------------------------------------
+
+    greeting_words = {
+        "hi",
+        "hello",
+        "hey",
+        "hiya",
+        "hello there",
+        "hi there",
+        "hey there",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }
+
+    how_are_you_patterns = (
+        "how are you",
+        "how are you doing",
+        "how is it going",
+        "how are things",
+        "how have you been",
+    )
+
+    # This deliberately handles combinations such as:
+    # "hi how are you", "hello how are you doing", etc.
+    if any(phrase in clean for phrase in how_are_you_patterns):
+        if any(
+            clean == greeting
+            or clean.startswith(greeting + " ")
+            for greeting in greeting_words
+        ):
+            return (
+                "Hi! I'm doing well and ready to help with your "
+                "Kubernetes operations."
+            )
+
+        return (
+            "I'm doing well and ready to help with your Kubernetes operations."
+        )
+
+    if clean in greeting_words:
+        return "Hello! Tell me what you want to do in Kubernetes."
+
+    # --------------------------------------------------
+    # Identity
+    # --------------------------------------------------
+
+    identity_patterns = (
+        "who are you",
+        "what are you",
+        "what is your name",
+        "tell me who you are",
+        "tell me about yourself",
+    )
+
+    if any(phrase in clean for phrase in identity_patterns):
+        return (
+            "I'm the Kubernetes AI Ops assistant in EC2 Manager. "
+            "I can interpret Kubernetes requests and run approved "
+            "operations."
+        )
+
+    # --------------------------------------------------
+    # Capabilities
+    # --------------------------------------------------
+
+    capability_patterns = (
+        "what can you do",
+        "what do you do",
+        "what are your capabilities",
+        "what can i ask",
+        "what do you support",
+        "what operations can you do",
+        "what kubernetes operations can you do",
+        "what can i do here",
+    )
+
+    if any(phrase in clean for phrase in capability_patterns):
+        return (
+            "I can scale deployments and statefulsets, restart supported "
+            "workloads, inspect resources, describe resources, check "
+            "rollout status, and perform supported delete operations. "
+            "You can also use voice commands."
+        )
+
+    # --------------------------------------------------
+    # Time
+    # --------------------------------------------------
+
+    time_patterns = (
         "what time is it",
-        "whats the time",
         "what is the time",
+        "whats the time",
         "current time",
         "time now",
         "tell me the time",
         "what time",
-    }:
-        now = datetime.now().astimezone()
-        return f"The current time is {now.strftime('%I:%M %p %Z')}."
+        "what is the current time",
+        "current local time",
+    )
 
-    if clean in {
+    if any(phrase == clean for phrase in time_patterns):
+        now = datetime.now().astimezone()
+        zone = now.tzname() or "local time"
+        return f"The current time is {now.strftime('%I:%M:%S %p')} {zone}."
+
+    # --------------------------------------------------
+    # Date
+    # --------------------------------------------------
+
+    date_patterns = (
         "what date is it",
         "whats the date",
         "what is the date",
         "current date",
-        "today's date",
         "todays date",
+        "today date",
         "what day is it",
         "what is today",
-    }:
+        "today",
+    )
+
+    if clean in date_patterns:
         now = datetime.now().astimezone()
         return f"Today is {now.strftime('%A, %d %B %Y')}."
 
-    if clean in {
-        "who are you",
-        "what are you",
-        "what is your name",
-    }:
-        return (
-            "I'm the Kubernetes AI Ops assistant. I can interpret "
-            "Kubernetes requests and run approved operations."
-        )
+    # --------------------------------------------------
+    # Current namespace
+    # --------------------------------------------------
 
-    if clean in {
-        "hello",
-        "hi",
-        "hey",
-        "hello there",
-        "hi there",
-    }:
-        return "Hello! Tell me what you want to do in Kubernetes."
-
-    if clean in {
-        "thanks",
-        "thank you",
-        "thank you very much",
-    }:
-        return "You're welcome."
-
-    if clean in {
-        "help",
-        "what can you do",
-        "what can i ask",
-        "what do you support",
-    }:
-        return (
-            "I can scale, restart, delete, inspect, describe, and check "
-            "rollout status for supported Kubernetes resources. "
-            "You can also use voice commands."
-        )
-
-    if clean in {
+    namespace_patterns = (
         "what namespace am i in",
         "which namespace am i in",
         "current namespace",
         "what is the current namespace",
         "which namespace is selected",
-    }:
-        return None  # Filled by the widget using its current namespace.
+        "what namespace is selected",
+        "what is my namespace",
+    )
 
-    if clean in {
+    if clean in namespace_patterns:
+        return (
+            f"The currently selected Kubernetes namespace is "
+            f"'{namespace or 'default'}'."
+        )
+
+    # --------------------------------------------------
+    # RTC
+    # --------------------------------------------------
+
+    rtc_patterns = (
         "what does rtc mean",
         "what is rtc",
         "define rtc",
-    }:
+        "what is a rtc",
+        "what is real time clock",
+        "what is a real time clock",
+    )
+
+    if clean in rtc_patterns:
         return (
-            "RTC commonly means Real-Time Clock — a clock that keeps track "
-            "of the current date and time, even when a device is powered off."
+            "RTC usually means Real-Time Clock. It is a hardware clock "
+            "used to keep track of the current date and time, even when "
+            "the main system is powered off."
         )
+
+    # --------------------------------------------------
+    # Thanks / acknowledgement
+    # --------------------------------------------------
+
+    thanks_patterns = (
+        "thanks",
+        "thank you",
+        "thank you very much",
+        "thanks a lot",
+        "ok thanks",
+        "okay thanks",
+        "great thanks",
+    )
+
+    if clean in thanks_patterns:
+        return "You're welcome."
+
+    # --------------------------------------------------
+    # Goodbye
+    # --------------------------------------------------
+
+    goodbye_patterns = (
+        "bye",
+        "goodbye",
+        "see you",
+        "see you later",
+    )
+
+    if clean in goodbye_patterns:
+        return "Goodbye!"
 
     return None
 
@@ -1452,66 +1580,63 @@ class K8sAIOpsWidget(QWidget):
         if self._busy:
             return
 
-        if not self.ssh:
-            self._write_error("No Kubernetes SSH connection is active.")
-            return
-
         request = self.request_input.text().strip()
         if not request:
             return
+
         if len(request) > MAX_PROMPT_CHARS:
             self._write_error(
                 f"Request is too long. Maximum is {MAX_PROMPT_CHARS} characters."
             )
             return
 
-        # Handle simple conversational/status questions locally so they do
-        # not consume an AI request and can work without Kubernetes intent
-        # parsing.
-        local_response = _general_question_response(request)
+        # --------------------------------------------------
+        # Handle common conversational/status questions locally.
+        #
+        # These must be checked BEFORE SSH/API-key validation because
+        # they do not need Kubernetes or an AI provider.
+        # --------------------------------------------------
 
-        clean_request = re.sub(
-            r"\s+",
-            " ",
-            request.strip().lower(),
+        namespace = self._namespace()
+
+        local_response = _general_question_response(
+            request,
+            namespace,
         )
-        clean_request = re.sub(r"[?!.,:;]+", "", clean_request).strip()
-
-        if clean_request in {
-            "what namespace am i in",
-            "which namespace am i in",
-            "current namespace",
-            "what is the current namespace",
-            "which namespace is selected",
-        }:
-            local_response = (
-                f"The currently selected namespace is "
-                f"{self._namespace()}."
-            )
 
         if local_response is not None:
             self.output.append(
                 f'<br><span style="color:{T["ACCENT"]}; font-weight:700;">'
                 f'Assistant:</span><br>'
                 f'<span style="color:{T["TEXT_PRIMARY"]}">'
-                f'{self._escape_html(local_response)}'
+                f'{self._escape_html(local_response).replace(chr(10), "<br>")}'
                 f'</span>'
             )
             self.status_lbl.setText("Ready")
+            self.request_input.setFocus()
+            return
+
+        # --------------------------------------------------
+        # Actual Kubernetes requests require a live connection.
+        # --------------------------------------------------
+
+        if not self.ssh:
+            self._write_error("No Kubernetes SSH connection is active.")
             return
 
         provider = ai_assist.get_provider()
         api_key = ai_assist.get_api_key(provider)
+
         if not api_key:
             label = ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
             QMessageBox.information(
                 self,
                 "No API key set",
-                f"Add a {label} API key in Settings → 🤖 AI to use AI Kubernetes Operations.",
+                f"Add a {label} API key in Settings → 🤖 AI "
+                "to use AI Kubernetes Operations.",
             )
             return
 
-        namespace = self._namespace()
         context = self._context()
 
         self.output.append(
