@@ -32,8 +32,9 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QShortcut,
 )
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QKeySequence
+from PyQt5.QtWidgets import QGraphicsBlurEffect
 
 import ai_assist
 from themes import T, load_settings, save_settings
@@ -618,13 +619,26 @@ class K8sAIOpsWidget(QWidget):
         self._voice_recording = False
         self._busy = False
         self._history = _load_history()
+        self._ai_access_allowed = False
+        self._ai_blur_effect = None
+        self._ai_lock_overlay = None
         self._build_ui()
 
     def set_ssh(self, ssh):
         self.ssh = ssh
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        # Keep the real AI Ops UI inside a separate content widget so the
+        # content can be blurred while a sharp access-lock overlay remains
+        # readable above it.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._ai_content = QWidget(self)
+        outer.addWidget(self._ai_content)
+
+        root = QVBoxLayout(self._ai_content)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(12)
 
@@ -737,6 +751,105 @@ class K8sAIOpsWidget(QWidget):
             "     repeat that\n"
         )
 
+        self._build_ai_access_overlay()
+        self.refresh_ai_access()
+
+    def _build_ai_access_overlay(self):
+        """Create the blurred/locked surface shown when no AI API key exists."""
+        self._ai_blur_effect = QGraphicsBlurEffect(self._ai_content)
+        self._ai_blur_effect.setBlurRadius(9)
+        self._ai_content.setGraphicsEffect(self._ai_blur_effect)
+
+        self._ai_lock_overlay = QWidget(self)
+        self._ai_lock_overlay.setObjectName("aiOpsLockOverlay")
+        self._ai_lock_overlay.setStyleSheet(
+            f"QWidget#aiOpsLockOverlay {{ background: rgba(0, 0, 0, 150); }}"
+        )
+
+        overlay_layout = QVBoxLayout(self._ai_lock_overlay)
+        overlay_layout.setContentsMargins(30, 30, 30, 30)
+
+        card = QWidget(self._ai_lock_overlay)
+        card.setObjectName("aiOpsLockCard")
+        card.setMaximumWidth(520)
+        card.setStyleSheet(
+            f"QWidget#aiOpsLockCard {{ "
+            f"background: {T['BG_PANEL']}; "
+            f"border: 1px solid {T['BORDER']}; "
+            f"border-radius: 16px; }}"
+        )
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(30, 26, 30, 26)
+        card_layout.setSpacing(10)
+
+        icon = QLabel("🔒")
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet("font-size: 34px; background: transparent; border: none;")
+        card_layout.addWidget(icon)
+
+        title = QLabel("AI Ops is locked")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(
+            f"color: {T['TEXT_PRIMARY']}; font-size: 18px; "
+            f"font-weight: 700; background: transparent; border: none;"
+        )
+        card_layout.addWidget(title)
+
+        self._ai_lock_message = QLabel()
+        self._ai_lock_message.setAlignment(Qt.AlignCenter)
+        self._ai_lock_message.setWordWrap(True)
+        self._ai_lock_message.setStyleSheet(
+            f"color: {T['TEXT_DIM']}; font-size: 13px; "
+            f"background: transparent; border: none;"
+        )
+        card_layout.addWidget(self._ai_lock_message)
+
+        overlay_layout.addStretch(1)
+        overlay_layout.addWidget(card, 0, Qt.AlignCenter)
+        overlay_layout.addStretch(1)
+
+        self._ai_lock_overlay.hide()
+
+    def _selected_ai_provider_label(self):
+        provider = ai_assist.get_provider()
+        return ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
+
+    def refresh_ai_access(self):
+        """Enable AI Ops only when the selected provider has an API key."""
+        provider = ai_assist.get_provider()
+        api_key = ai_assist.get_api_key(provider)
+        allowed = bool((api_key or "").strip())
+        self._ai_access_allowed = allowed
+
+        if hasattr(self, "_ai_lock_overlay") and self._ai_lock_overlay is not None:
+            if allowed:
+                self._ai_lock_overlay.hide()
+                self._ai_content.setGraphicsEffect(None)
+                self.status_lbl.setText("Ready")
+            else:
+                label = self._selected_ai_provider_label()
+                self._ai_lock_message.setText(
+                    f"Add an API key for <b>{self._escape_html(label)}</b> "
+                    "in <b>Settings → 🤖 AI</b> to access Kubernetes AI Operations."
+                )
+                self._ai_content.setGraphicsEffect(self._ai_blur_effect)
+                self._ai_lock_overlay.raise_()
+                self._ai_lock_overlay.show()
+                self.status_lbl.setText("API key required")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._ai_lock_overlay is not None:
+            self._ai_lock_overlay.setGeometry(self.rect())
+            self._ai_lock_overlay.raise_()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Settings may have been changed while another dialog/tab was active.
+        # Re-check whenever AI Ops becomes visible so it unlocks without a restart.
+        self.refresh_ai_access()
+
     def _namespace(self) -> str:
         if self._namespace_getter:
             try:
@@ -812,6 +925,10 @@ class K8sAIOpsWidget(QWidget):
 
     def _toggle_voice_recording(self):
         """Start/stop microphone capture without using an LLM for STT."""
+
+        if not self._ai_access_allowed:
+            self.refresh_ai_access()
+            return
 
         if self._voice_recording:
             self._stop_voice_recording()
@@ -997,6 +1114,10 @@ class K8sAIOpsWidget(QWidget):
         self._write_info("\n✓ AI Ops history cleared.")
 
     def _submit(self):
+        if not self._ai_access_allowed:
+            self.refresh_ai_access()
+            return
+
         if self._busy:
             return
 
