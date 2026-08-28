@@ -1,9 +1,10 @@
 """dashboard_tab.py — Live VM + Kubernetes node dashboard tab.
 
 Shows the connected instance's specs (hostname/OS/kernel, CPU, RAM, disk)
-and — when a cluster is reachable — a one-row-per-node table (CPU %,
-memory %, the kubelet's own MemoryPressure/DiskPressure/PIDPressure
-conditions). Double-clicking a node opens a separate window with the
+and — when a cluster is reachable — a cluster overview plus one-card-per-node
+summary with live CPU/memory usage, capacity/allocatable resources,
+Kubernetes/runtime metadata, and MemoryPressure/DiskPressure/PIDPressure
+conditions. Double-clicking a node opens a separate window with the
 pods actually running on it, including each pod's own CPU/memory usage,
 restart count, and ready state (see NodeDetailWindow below).
 
@@ -29,7 +30,7 @@ import time
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem, QGraphicsDropShadowEffect,
+    QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem, QGraphicsDropShadowEffect, QSizePolicy,
 )
 from PyQt5.QtCore import (
     Qt, QTimer, pyqtSignal, QVariantAnimation, QEasingCurve,
@@ -115,22 +116,40 @@ if ! command -v kubectl >/dev/null 2>&1; then
   echo __NODES__
   echo "kubectl: not found"
   echo __COND__
+  echo __NODEINFO__
   echo __TOP__
   echo __PODS__
   echo __PODTOP__
+  echo __WORKLOADS__
+  echo __SERVICES__
+  echo __EVENTS__
 else
   echo __NODES__
   kubectl get nodes -o wide --no-headers 2>/dev/null
   echo __COND__
   kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}|{.status.conditions[?(@.type=="Ready")].status}|{.status.conditions[?(@.type=="MemoryPressure")].status}|{.status.conditions[?(@.type=="DiskPressure")].status}|{.status.conditions[?(@.type=="PIDPressure")].status}{"\n"}{end}' 2>/dev/null
+  echo __NODEINFO__
+  kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}|{.status.nodeInfo.kubeletVersion}|{.status.nodeInfo.osImage}|{.status.nodeInfo.kernelVersion}|{.status.nodeInfo.containerRuntimeVersion}|{.status.addresses[?(@.type=="InternalIP")].address}|{.status.capacity.cpu}|{.status.capacity.memory}|{.status.capacity.pods}|{.status.allocatable.cpu}|{.status.allocatable.memory}|{.status.allocatable.pods}{"\n"}{end}' 2>/dev/null
   echo __TOP__
   kubectl top nodes --no-headers 2>/dev/null
   echo __PODS__
-  kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|{.spec.nodeName}|{range .status.containerStatuses[*]}{.restartCount}{","}{end}|{range .status.containerStatuses[*]}{.ready}{","}{end}{"\n"}{end}' 2>/dev/null
+  kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|{.spec.nodeName}|{range .status.containerStatuses[*]}{.restartCount}{","}{end}|{range .status.containerStatuses[*]}{.ready}{","}{end}|{.status.reason}|{.status.message}|{.status.podIP}|{.status.hostIP}|{.status.qosClass}|{.metadata.creationTimestamp}|{range .metadata.ownerReferences[0]}{.kind}{"/"}{.name}{end}|{range .status.containerStatuses[*]}{.name}={.state.waiting.reason},{.state.waiting.message}{";"}{end}{"\n"}{end}' 2>/dev/null
   echo __PODTOP__
   kubectl top pods --all-namespaces --no-headers 2>/dev/null
+  echo __WORKLOADS__
+  kubectl get deployments --all-namespaces -o jsonpath='{range .items[*]}Deployment|{.metadata.namespace}|{.metadata.name}|{.metadata.creationTimestamp}|{.status.replicas}|{.status.readyReplicas}|{.status.availableReplicas}|{.status.updatedReplicas}|{.status.unavailableReplicas}|{.spec.replicas}{"\n"}{end}' 2>/dev/null
+  kubectl get statefulsets --all-namespaces -o jsonpath='{range .items[*]}StatefulSet|{.metadata.namespace}|{.metadata.name}|{.metadata.creationTimestamp}|{.status.replicas}|{.status.readyReplicas}|{.status.currentReplicas}|{.status.updatedReplicas}|{.status.readyReplicas}|{.spec.replicas}{"\n"}{end}' 2>/dev/null
+  kubectl get daemonsets --all-namespaces -o jsonpath='{range .items[*]}DaemonSet|{.metadata.namespace}|{.metadata.name}|{.metadata.creationTimestamp}|{.status.desiredNumberScheduled}|{.status.numberReady}|{.status.numberAvailable}|{.status.updatedNumberScheduled}|{.status.numberUnavailable}|{.status.desiredNumberScheduled}{"\n"}{end}' 2>/dev/null
+  echo __SERVICES__
+  kubectl get services --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.spec.type}|{.spec.clusterIP}|{.status.loadBalancer.ingress[0].ip}|{.status.loadBalancer.ingress[0].hostname}|{range .spec.ports[*]}{.name}:{.port}/{.protocol}:{.nodePort}{","}{end}|{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null
+  echo __ENDPOINTS__
+  kubectl get endpoints --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{range .subsets[*].addresses[*]}1{";"}{end}|{range .subsets[*].notReadyAddresses[*]}1{";"}{end}{"\n"}{end}' 2>/dev/null
+
+  echo __EVENTS__
+  kubectl get events --all-namespaces --sort-by=.lastTimestamp -o jsonpath='{range .items[*]}{.lastTimestamp}|{.type}|{.reason}|{.involvedObject.kind}|{.involvedObject.namespace}|{.involvedObject.name}|{.message}{"\n"}{end}' 2>/dev/null
 fi
 """
+
 # Full pod inventory (__PODS__ above) is fetched via jsonpath rather than
 # `-o wide` text parsing — newer kubectl versions render RESTARTS as
 # "N (Ndhm ago)" with an embedded space, which silently shifts every
@@ -173,6 +192,29 @@ def _split_sections(out: str) -> dict:
 _DF_SIZE_RE = re.compile(r"^([\d.]+)([KMGTP]?)i?$")
 _DF_SIZE_MULT = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3,
                   "T": 1024**4, "P": 1024**5}
+
+def _short_age(timestamp: str) -> str:
+    """Convert a Kubernetes ISO-8601 timestamp to a compact age."""
+    if not timestamp:
+        return "—"
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(timestamp.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        seconds = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+        if seconds < 60: return f"{seconds}s"
+        minutes = seconds // 60
+        if minutes < 60: return f"{minutes}m"
+        hours = minutes // 60
+        if hours < 24: return f"{hours}h"
+        days = hours // 24
+        if days < 30: return f"{days}d"
+        months = days // 30
+        if months < 12: return f"{months}mo"
+        return f"{days // 365}y"
+    except (ValueError, TypeError, OverflowError):
+        return timestamp[:19].replace("T", " ")
 
 
 def _parse_df_size(s: str):
@@ -239,26 +281,58 @@ _CPU_VAL_RE = re.compile(r"^\d+m?$")
 _MEM_VAL_RE = re.compile(r"^\d+(Ki|Mi|Gi)?$")
 
 
+def _k8s_mem_to_bytes(value: str):
+    """Convert a Kubernetes memory quantity to bytes for compact display."""
+    m = re.match(r"^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G|T)?$", (value or "").strip())
+    if not m:
+        return None
+    multipliers = {
+        None: 1, "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4,
+        "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
+    }
+    try:
+        return float(m.group(1)) * multipliers[m.group(2)]
+    except (ValueError, KeyError):
+        return None
+
+
+def _k8s_mem_fmt(value: str) -> str:
+    """Format a Kubernetes memory quantity as a compact binary unit."""
+    raw = _k8s_mem_to_bytes(value)
+    if raw is None:
+        return value or "n/a"
+    for unit, factor in (("Ti", 1024**4), ("Gi", 1024**3), ("Mi", 1024**2), ("Ki", 1024)):
+        if raw >= factor:
+            amount = raw / factor
+            return f"{amount:.1f} {unit}" if amount < 100 else f"{amount:.0f} {unit}"
+    return f"{raw:.0f} B"
+
+
+def _k8s_cpu_fmt(value: str) -> str:
+    """Format a Kubernetes CPU quantity in cores."""
+    value = (value or "").strip()
+    if not value:
+        return "n/a"
+    try:
+        if value.endswith("m"):
+            cores = float(value[:-1]) / 1000.0
+        else:
+            cores = float(value)
+    except ValueError:
+        return value
+    return f"{cores:.2f} cores" if cores < 10 else f"{cores:.0f} cores"
+
+
 class NodeDetailWindow(QWidget):
-    """Standalone top-level window showing the pods scheduled on one node.
+    """Standalone operational view of the pods scheduled on one node."""
 
-    Opened by double-clicking a node row in DashboardTab's nodes table.
-    It does not poll on its own — DashboardTab pushes fresh pod data into
-    it via update_pods() every time the main dashboard refreshes, as long
-    as this window stays open (tracked in DashboardTab._node_windows).
-    """
-
-    closed = pyqtSignal(str)  # emits the node name when the window closes
+    closed = pyqtSignal(str)
 
     def __init__(self, node_name: str, parent=None):
-        # Qt.Window makes this an independent top-level window rather than
-        # an embedded child, even though a parent is passed (so it can be
-        # tracked/cleaned up via the owner without being confined to the
-        # main window's layout).
         super().__init__(parent, Qt.Window)
         self.node_name = node_name
         self.setWindowTitle(f"Node — {node_name}")
-        self.resize(760, 480)
+        self.resize(1120, 620)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
@@ -266,22 +340,23 @@ class NodeDetailWindow(QWidget):
 
         self.title_lbl = QLabel(f"⎈  {node_name}")
         root.addWidget(self.title_lbl)
-
         self.summary_lbl = QLabel("Waiting for data…")
         root.addWidget(self.summary_lbl)
 
         self.pod_tree = QTreeWidget()
-        self.pod_tree.setHeaderLabels(
-            ["Pod", "Namespace", "Status", "CPU", "Memory", "Restarts", "Ready"]
-        )
+        self.pod_tree.setHeaderLabels([
+            "Pod", "Namespace", "Status", "CPU", "Memory",
+            "Restarts", "Ready", "IP", "Age", "Owner"
+        ])
         self.pod_tree.setRootIsDecorated(False)
         self.pod_tree.setUniformRowHeights(True)
         self.pod_tree.setFont(monospace_font(12))
+        self.pod_tree.itemDoubleClicked.connect(self._show_pod_details)
         root.addWidget(self.pod_tree)
 
+        self._pod_snapshot = {}
         self._apply_styles()
 
-    # ── Styling ────────────────────────────────────────────────
     def _apply_styles(self):
         self.setStyleSheet(f"background: {T['BG_DARK']};")
         self.title_lbl.setStyleSheet(
@@ -289,55 +364,90 @@ class NodeDetailWindow(QWidget):
         )
         self.summary_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
         self.pod_tree.setStyleSheet(
-            f"QTreeWidget {{ font-size: 12px; }} QTreeWidget::item {{ height: 28px; }}"
+            f"QTreeWidget {{ font-size: 12px; }} QTreeWidget::item {{ height: 30px; }}"
         )
 
     def refresh_theme(self):
         self._apply_styles()
 
-    # ── Data ───────────────────────────────────────────────────
     def update_pods(self, pods: list, pod_usage: dict):
-        """Replace the pod list with a fresh snapshot. *pod_usage* is the
-        full {(namespace, name): {"cpu":..., "mem":...}} map from the last
-        `kubectl top pods` — the same one the main dashboard uses — so
-        usage is looked up per pod rather than passed pre-filtered."""
+        self._pod_snapshot = {(p["namespace"], p["name"]): p for p in pods}
         self.pod_tree.clear()
+
         for pod in sorted(pods, key=lambda p: (p["namespace"], p["name"])):
+            usage = pod_usage.get((pod["namespace"], pod["name"]))
             item = QTreeWidgetItem([
                 pod["name"], pod["namespace"], pod["phase"],
-                "", "", str(pod["restarts"]), pod["ready"],
+                usage["cpu"] if usage else "n/a",
+                usage["mem"] if usage else "n/a",
+                str(pod["restarts"]), pod["ready"],
+                pod.get("pod_ip") or "—",
+                _short_age(pod.get("created", "")),
+                pod.get("owner") or "—",
             ])
+            item.setData(0, Qt.UserRole, (pod["namespace"], pod["name"]))
             item.setForeground(2, QColor(_status_color(pod["phase"])))
-
+            if pod["restarts"] > 0:
+                item.setForeground(5, QColor(T["WARNING"] if pod["restarts"] < 5 else T["DANGER"]))
             ready_str = pod["ready"]
             if "/" in ready_str:
                 got, want = ready_str.split("/", 1)
                 if got.isdigit() and want.isdigit():
-                    item.setForeground(
-                        6, QColor(T["SUCCESS"] if got == want and int(want) > 0 else T["WARNING"])
-                    )
-            if pod["restarts"] > 0:
-                item.setForeground(5, QColor(T["WARNING"] if pod["restarts"] < 5 else T["DANGER"]))
-
-            usage = pod_usage.get((pod["namespace"], pod["name"]))
-            for col, key in ((3, "cpu"), (4, "mem")):
-                if usage is not None:
-                    item.setText(col, usage[key])
-                    item.setForeground(col, QColor(T["TEXT_PRIMARY"]))
-                else:
-                    item.setText(col, "n/a")
-                    item.setForeground(col, QColor(T["TEXT_MUTED"]))
-
+                    item.setForeground(6, QColor(
+                        T["SUCCESS"] if got == want and int(want) > 0 else T["WARNING"]
+                    ))
+            for col in (3, 4):
+                item.setForeground(col, QColor(T["TEXT_PRIMARY"] if usage else T["TEXT_MUTED"]))
+            tooltip = self._pod_tooltip(pod)
+            for col in range(10):
+                item.setToolTip(col, tooltip)
             self.pod_tree.addTopLevelItem(item)
 
-        for col in range(7):
+        for col in range(10):
             self.pod_tree.resizeColumnToContents(col)
 
         self.summary_lbl.setText(
-            f"{len(pods)} pod(s) scheduled here  ·  updated " + time.strftime("%H:%M:%S")
+            f"{len(pods)} pod(s) scheduled here  · double-click a pod for details  · "
+            f"updated {time.strftime('%H:%M:%S')}"
         )
 
-    # ── Teardown ───────────────────────────────────────────────
+    def _pod_tooltip(self, pod):
+        lines = [
+            f"Pod: {pod['name']}", f"Namespace: {pod['namespace']}",
+            f"Phase: {pod['phase']}", f"Ready: {pod['ready']}",
+            f"Restarts: {pod['restarts']}",
+        ]
+        for key, label in (("pod_ip", "Pod IP"), ("host_ip", "Host IP"),
+                           ("qos", "QoS"), ("owner", "Owner"),
+                           ("reason", "Reason"), ("message", "Message"),
+                           ("waiting", "Container state")):
+            if pod.get(key):
+                lines.append(f"{label}: {pod[key]}")
+        return "\n".join(lines)
+
+    def _show_pod_details(self, item, _column):
+        key = item.data(0, Qt.UserRole)
+        if not key:
+            return
+        pod = self._pod_snapshot.get(tuple(key))
+        if not pod:
+            return
+        from PyQt5.QtWidgets import QMessageBox
+        lines = [
+            f"Pod: {pod['name']}", f"Namespace: {pod['namespace']}",
+            f"Phase: {pod['phase']}", f"Ready: {pod['ready']}",
+            f"Restarts: {pod['restarts']}", f"Node: {self.node_name}",
+            f"Pod IP: {pod.get('pod_ip') or '—'}",
+            f"Host IP: {pod.get('host_ip') or '—'}",
+            f"QoS: {pod.get('qos') or '—'}",
+            f"Age: {_short_age(pod.get('created', ''))}",
+            f"Owner: {pod.get('owner') or '—'}",
+        ]
+        if pod.get("reason"): lines.append(f"Reason: {pod['reason']}")
+        if pod.get("message"): lines.append(f"Message: {pod['message']}")
+        if pod.get("waiting"): lines.append(f"Container state: {pod['waiting']}")
+        QMessageBox.information(self, f"Pod — {pod['name']}", "\n".join(lines))
+
     def closeEvent(self, event):
         self.closed.emit(self.node_name)
         super().closeEvent(event)
@@ -390,6 +500,11 @@ class NodeCard(QFrame):
         self.roles_lbl = QLabel("")
         outer.addWidget(self.roles_lbl)
 
+        self.meta_lbl = QLabel("")
+        self.meta_lbl.setWordWrap(True)
+        self.meta_lbl.setMinimumHeight(28)
+        outer.addWidget(self.meta_lbl)
+
         outer.addStretch(1)
 
         self.cpu_ring = self.mem_ring = None
@@ -402,6 +517,7 @@ class NodeCard(QFrame):
             # live metrics for anything, so it can't be read as a node
             # stuck at 0% or in an unknown state.
             self.roles_lbl.setText("Pods not tied to a specific node")
+            self.meta_lbl.hide()
             self.status_lbl.hide()
 
             blurb = QLabel(
@@ -515,6 +631,7 @@ class NodeCard(QFrame):
             f"font-size: 15px; font-weight: 700;"
         )
         self.roles_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.meta_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 10px;")
         self.pods_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
         for cap in self._ring_caps:
             cap.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px; font-weight: 600;")
@@ -537,7 +654,8 @@ class NodeCard(QFrame):
     # ── Data ───────────────────────────────────────────────────
     def update_data(self, status: str, roles: str, cpu_pct, mem_pct,
                      pod_count: int, pressure_text: str, pressure_ok: bool,
-                     cpu_tip: str = None, mem_tip: str = None):
+                     cpu_tip: str = None, mem_tip: str = None,
+                     node_info: dict = None):
         """Update a real-node card. Not used for bucket cards — those only
         ever show a pod count, set directly via update_pod_count()."""
         self.status_lbl.setText(status or "—")
@@ -546,6 +664,30 @@ class NodeCard(QFrame):
             f"color: {status_color}; font-size: 12px; font-weight: 700;"
         )
         self.roles_lbl.setText(roles or "—")
+
+        info = node_info or {}
+        version = info.get("kubelet") or "Kubernetes version unavailable"
+        internal_ip = info.get("ip") or "IP unavailable"
+        cpu_cap = _k8s_cpu_fmt(info.get("cpu_capacity", ""))
+        cpu_alloc = _k8s_cpu_fmt(info.get("cpu_allocatable", ""))
+        mem_cap = _k8s_mem_fmt(info.get("mem_capacity", ""))
+        mem_alloc = _k8s_mem_fmt(info.get("mem_allocatable", ""))
+        self.meta_lbl.setText(
+            f"{version}  ·  {internal_ip}\n"
+            f"CPU {cpu_cap} cap / {cpu_alloc} alloc  ·  "
+            f"RAM {mem_cap} cap / {mem_alloc} alloc"
+        )
+        self.meta_lbl.show()
+        self.setToolTip(
+            f"{self.node_name}\n"
+            f"Kubernetes: {version}\n"
+            f"OS: {info.get('os', 'n/a')}\n"
+            f"Kernel: {info.get('kernel', 'n/a')}\n"
+            f"Runtime: {info.get('runtime', 'n/a')}\n"
+            f"Internal IP: {internal_ip}\n"
+            f"CPU capacity: {cpu_cap}\nCPU allocatable: {cpu_alloc}\n"
+            f"Memory capacity: {mem_cap}\nMemory allocatable: {mem_alloc}"
+        )
 
         if cpu_pct is not None:
             self.cpu_ring.setValue(cpu_pct, _pct_color(cpu_pct))
@@ -825,6 +967,73 @@ class DashboardTab(QWidget):
         self.vm_card["body"].addLayout(vm_body)
         self._content_layout.addWidget(self.vm_card["frame"])
 
+        # ── Kubernetes cluster overview ─────────────────────
+        self.k8s_summary_card = self._make_card("☸  Kubernetes Overview")
+        summary_grid = QGridLayout()
+        summary_grid.setHorizontalSpacing(12)
+        summary_grid.setVerticalSpacing(10)
+        self._k8s_summary = {}
+        summary_specs = [
+            ("nodes", "Nodes"), ("pods", "Pods"), ("running", "Running"), ("pending", "Pending"),
+            ("failed", "Failed"), ("namespaces", "Namespaces"), ("pressure", "Pressure"), ("metrics", "Metrics"),
+        ]
+        for i, (key, label) in enumerate(summary_specs):
+            tile = QFrame()
+            tile.setObjectName("k8s_summary_tile")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(12, 8, 12, 8)
+            tile_layout.setSpacing(2)
+            value = QLabel("—")
+            value.setAlignment(Qt.AlignCenter)
+            value.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 17px; font-weight: 700;")
+            caption = QLabel(label)
+            caption.setAlignment(Qt.AlignCenter)
+            caption.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 10px; font-weight: 600;")
+            tile_layout.addWidget(value)
+            tile_layout.addWidget(caption)
+            summary_grid.addWidget(tile, i // 4, i % 4)
+            self._k8s_summary[key] = value
+        self.k8s_summary_card["body"].addLayout(summary_grid)
+        self._content_layout.addWidget(self.k8s_summary_card["frame"])
+
+        # ── Phase 2: workloads ─────────────────────────────
+        self.workloads_card = self._make_card("🚀  Workloads")
+        self.workloads_tree = QTreeWidget()
+        self.workloads_tree.setHeaderLabels([
+            "Kind", "Namespace", "Name", "Ready", "Desired",
+            "Available", "Updated", "Unavailable", "Age"
+        ])
+        self._style_tree(self.workloads_tree)
+        self.workloads_tree.setMinimumHeight(130)
+        self.workloads_tree.setMaximumHeight(260)
+        self.workloads_card["body"].addWidget(self.workloads_tree)
+        self._content_layout.addWidget(self.workloads_card["frame"])
+
+        # ── Phase 2: services ──────────────────────────────
+        self.services_card = self._make_card("🌐  Services")
+        self.services_tree = QTreeWidget()
+        self.services_tree.setHeaderLabels([
+            "Service", "Namespace", "Type", "Cluster IP",
+            "External", "Ports", "Endpoints", "Age"
+        ])
+        self._style_tree(self.services_tree)
+        self.services_tree.setMinimumHeight(110)
+        self.services_tree.setMaximumHeight(240)
+        self.services_card["body"].addWidget(self.services_tree)
+        self._content_layout.addWidget(self.services_card["frame"])
+
+        # ── Phase 2: recent Kubernetes events ───────────────
+        self.events_card = self._make_card("⚠  Recent Kubernetes Events")
+        self.events_tree = QTreeWidget()
+        self.events_tree.setHeaderLabels([
+            "Time", "Type", "Reason", "Object", "Namespace", "Message"
+        ])
+        self._style_tree(self.events_tree)
+        self.events_tree.setMinimumHeight(130)
+        self.events_tree.setMaximumHeight(300)
+        self.events_card["body"].addWidget(self.events_tree)
+        self._content_layout.addWidget(self.events_card["frame"])
+
         # ── Kubernetes nodes card ────────────────────────────
         # Nodes only — pods used to be shown as inline expandable children
         # of each node, which made this card feel cramped. They now live in
@@ -866,6 +1075,10 @@ class DashboardTab(QWidget):
         root.addWidget(scroll)
 
         self.vm_card["frame"].hide()
+        self.k8s_summary_card["frame"].hide()
+        self.workloads_card["frame"].hide()
+        self.services_card["frame"].hide()
+        self.events_card["frame"].hide()
         self.k8s_card["frame"].hide()
 
         self._apply_styles()
@@ -919,7 +1132,7 @@ class DashboardTab(QWidget):
 
     # ── Node card grid ─────────────────────────────────────────
     NODE_GRID_COLS     = 3
-    NODE_CARD_MIN_SIDE = 300   # never shrink cards smaller than this (rings need room)
+    NODE_CARD_MIN_SIDE = 320   # leave room for rings plus the Phase 1 metadata line
     NODE_CARD_MAX_SIDE = 420   # cap growth on very wide windows
 
     def _clear_node_grid(self):
@@ -1017,7 +1230,9 @@ class DashboardTab(QWidget):
 
     def _apply_styles(self):
         self.ctrl_bar.setStyleSheet(f"background: {T['BG_PANEL']}; border-bottom: 1px solid {T['BORDER']};")
-        for frame in (self.vm_card["frame"], self.k8s_card["frame"]):
+        for frame in (self.vm_card["frame"], self.k8s_summary_card["frame"],
+                       self.workloads_card["frame"], self.services_card["frame"],
+                       self.events_card["frame"], self.k8s_card["frame"]):
             frame.setStyleSheet(
                 f"QFrame#dash_card {{ background: {T['BG_PANEL']}; "
                 f"border: 1px solid {T['BORDER']}; border-radius: 10px; }}"
@@ -1040,6 +1255,10 @@ class DashboardTab(QWidget):
     def _show_disconnected(self):
         self.disconnected_lbl.show()
         self.vm_card["frame"].hide()
+        self.k8s_summary_card["frame"].hide()
+        self.workloads_card["frame"].hide()
+        self.services_card["frame"].hide()
+        self.events_card["frame"].hide()
         self.k8s_card["frame"].hide()
         self.updated_lbl.setText("")
         self._update_live_label()
@@ -1047,6 +1266,10 @@ class DashboardTab(QWidget):
     def _show_connected_placeholder(self):
         self.disconnected_lbl.hide()
         self.vm_card["frame"].show()
+        self.k8s_summary_card["frame"].show()
+        self.workloads_card["frame"].show()
+        self.services_card["frame"].show()
+        self.events_card["frame"].show()
         self.k8s_card["frame"].show()
         self._update_live_label()
 
@@ -1252,8 +1475,16 @@ class DashboardTab(QWidget):
                 msg = "No Kubernetes cluster detected on this instance (kubectl unavailable or no nodes)."
             self.k8s_note.setText(msg)
             self.k8s_note.show()
+            self.k8s_summary_card["frame"].hide()
+            self.workloads_card["frame"].hide()
+            self.services_card["frame"].hide()
+            self.events_card["frame"].hide()
+            self.workloads_tree.clear()
+            self.services_tree.clear()
+            self.events_tree.clear()
             return
         self.k8s_note.hide()
+        self.k8s_summary_card["frame"].show()
 
         # Pressure conditions, keyed by node name
         cond = {}
@@ -1266,6 +1497,35 @@ class DashboardTab(QWidget):
             cond[name.strip()] = {
                 "ready": ready.strip(), "mem": mem_p.strip(),
                 "disk": disk_p.strip(), "pid": pid_p.strip(),
+            }
+
+        # Node capacity/allocatable and runtime metadata, keyed by node name.
+        # This comes from the Kubernetes API rather than the human-oriented
+        # `kubectl get nodes -o wide` table, so resource quantities remain
+        # stable across kubectl versions.
+        node_info = {}
+        for line in sec.get("NODEINFO", []):
+            if "|" not in line:
+                continue
+            bits = line.split("|")
+            bits += [""] * (12 - len(bits))
+            (name, kubelet, os_image, kernel, runtime, ip, cpu_capacity,
+             mem_capacity, pod_capacity, cpu_allocatable, mem_allocatable,
+             pod_allocatable) = bits[:12]
+            if not name.strip():
+                continue
+            node_info[name.strip()] = {
+                "kubelet": kubelet.strip(),
+                "os": os_image.strip(),
+                "kernel": kernel.strip(),
+                "runtime": runtime.strip(),
+                "ip": ip.strip(),
+                "cpu_capacity": cpu_capacity.strip(),
+                "mem_capacity": mem_capacity.strip(),
+                "pod_capacity": pod_capacity.strip(),
+                "cpu_allocatable": cpu_allocatable.strip(),
+                "mem_allocatable": mem_allocatable.strip(),
+                "pod_allocatable": pod_allocatable.strip(),
             }
 
         # CPU%/MEM% from `kubectl top nodes`, keyed by node name. Absent
@@ -1289,18 +1549,24 @@ class DashboardTab(QWidget):
             if "|" not in line:
                 continue
             bits = line.split("|")
-            bits += [""] * (6 - len(bits))
-            ns, pname, phase, node, restarts_csv, ready_csv = bits[:6]
+            bits += [""] * (15 - len(bits))
+            (ns, pname, phase, node, restarts_csv, ready_csv, reason, message,
+             pod_ip, host_ip, qos, created, owner, waiting) = bits[:14]
             ns, pname, phase, node = ns.strip(), pname.strip(), phase.strip(), node.strip()
             if not pname:
                 continue
             restarts = sum(int(x) for x in restarts_csv.split(",") if x.strip().isdigit())
             ready_flags = [x for x in ready_csv.split(",") if x.strip()]
             ready_count = sum(1 for x in ready_flags if x.strip() == "true")
+            waiting = ";".join(x.strip() for x in waiting.split(";") if x.strip())
             pods_by_node.setdefault(node or "(unscheduled)", []).append({
                 "namespace": ns, "name": pname, "phase": phase or "Unknown",
                 "restarts": restarts,
                 "ready": f"{ready_count}/{len(ready_flags)}" if ready_flags else "-",
+                "reason": reason.strip(), "message": message.strip(),
+                "pod_ip": pod_ip.strip(), "host_ip": host_ip.strip(),
+                "qos": qos.strip(), "created": created.strip(),
+                "owner": owner.strip(), "waiting": waiting,
             })
 
         # Per-pod CPU/memory usage from `kubectl top pods`, keyed by
@@ -1316,6 +1582,75 @@ class DashboardTab(QWidget):
             if len(parts) >= 4 and _CPU_VAL_RE.match(parts[2]) and _MEM_VAL_RE.match(parts[3]):
                 pod_usage[(parts[0], parts[1])] = {"cpu": parts[2], "mem": parts[3]}
 
+        # ── Phase 2: workloads ──────────────────────────────
+        workloads = []
+        for line in sec.get("WORKLOADS", []):
+            if "|" not in line:
+                continue
+            bits = line.split("|")
+            if len(bits) < 10:
+                continue
+            kind, ns, name, created, replicas, ready, available, updated, unavailable, desired = bits[:10]
+            if not name.strip():
+                continue
+            workloads.append({
+                "kind": kind.strip(), "namespace": ns.strip(), "name": name.strip(),
+                "created": created.strip(), "replicas": replicas.strip() or "0",
+                "ready": ready.strip() or "0", "available": available.strip() or "0",
+                "updated": updated.strip() or "0", "unavailable": unavailable.strip() or "0",
+                "desired": desired.strip() or replicas.strip() or "0",
+            })
+
+        # ── Phase 2: services/endpoints ────────────────────
+        endpoint_counts = {}
+        for line in sec.get("ENDPOINTS", []):
+            bits = line.split("|")
+            if len(bits) < 3:
+                continue
+            ns, name = bits[0].strip(), bits[1].strip()
+            ready_count = sum(1 for x in bits[2].split(";") if x.strip())
+            not_ready_count = sum(1 for x in (bits[3] if len(bits) > 3 else "").split(";") if x.strip())
+            endpoint_counts[(ns, name)] = (ready_count, not_ready_count)
+
+        services = []
+        for line in sec.get("SERVICES", []):
+            if "|" not in line:
+                continue
+            bits = line.split("|")
+            bits += [""] * (8 - len(bits))
+            ns, name, svc_type, cluster_ip, ext_ip, ext_host, ports, created = bits[:8]
+            if not name.strip():
+                continue
+            external = ext_ip.strip() or ext_host.strip() or "—"
+            ep_ready, ep_notready = endpoint_counts.get((ns.strip(), name.strip()), (0, 0))
+            services.append({
+                "namespace": ns.strip(), "name": name.strip(),
+                "type": svc_type.strip() or "ClusterIP",
+                "cluster_ip": cluster_ip.strip() or "—",
+                "external": external,
+                "ports": ports.strip().rstrip(",") or "—",
+                "endpoints": f"{ep_ready}" + (f" (+{ep_notready} not ready)" if ep_notready else ""),
+                "created": created.strip(),
+            })
+
+        # ── Phase 2: recent events ─────────────────────────
+        events = []
+        for line in sec.get("EVENTS", []):
+            if "|" not in line:
+                continue
+            bits = line.split("|", 6)
+            if len(bits) < 7:
+                continue
+            ts, etype, reason, obj_kind, ns, obj_name, message = [x.strip() for x in bits]
+            if not reason and not message:
+                continue
+            events.append({
+                "timestamp": ts, "type": etype or "Normal", "reason": reason or "—",
+                "object": f"{obj_kind}/{obj_name}" if obj_kind and obj_name else obj_name,
+                "namespace": ns or "—", "message": message or "—",
+            })
+        events = events[-50:]
+
         # NOTE: no _clear_node_grid() here — cards are now reused across
         # refreshes (see _get_or_create_node_card / _reflow_node_grid) so
         # their CircularProgress rings only animate when a value actually
@@ -1325,6 +1660,96 @@ class DashboardTab(QWidget):
         _node_order = []
 
         _pressure_names = {"mem": "MemoryPressure", "disk": "DiskPressure", "pid": "PIDPressure"}
+
+        # Cluster-level summary. Keep this derived from the same snapshot so
+        # the overview and node/pod cards always describe the same moment.
+        all_pods = [p for node_pods in pods_by_node.values() for p in node_pods]
+        # Pods already associated with known nodes are still in pods_by_node
+        # at this point; pop() below happens afterwards.
+        total_pods = len(all_pods)
+        running_pods = sum(1 for p in all_pods if p["phase"].lower() == "running")
+        pending_pods = sum(1 for p in all_pods if p["phase"].lower() == "pending")
+        failed_pods = sum(1 for p in all_pods if p["phase"].lower() in ("failed", "unknown"))
+        namespaces = len({p["namespace"] for p in all_pods if p["namespace"]})
+        pressure_nodes = 0
+        for node_name in cond:
+            c = cond.get(node_name, {})
+            if any(c.get(k) == "True" for k in ("mem", "disk", "pid")):
+                pressure_nodes += 1
+        ready_nodes = sum(1 for line in node_lines if len(line.split()) >= 2 and line.split()[1].lower().split(",", 1)[0] == "ready")
+        metrics_available = bool(top)
+        self._k8s_summary["nodes"].setText(f"{ready_nodes}/{len(node_lines)}")
+        self._k8s_summary["pods"].setText(str(total_pods))
+        self._k8s_summary["running"].setText(str(running_pods))
+        self._k8s_summary["pending"].setText(str(pending_pods))
+        self._k8s_summary["failed"].setText(str(failed_pods))
+        self._k8s_summary["namespaces"].setText(str(namespaces))
+        self._k8s_summary["pressure"].setText(str(pressure_nodes))
+        self._k8s_summary["metrics"].setText("Available" if metrics_available else "Unavailable")
+        self._k8s_summary["metrics"].setStyleSheet(
+            f"color: {T['SUCCESS'] if metrics_available else T['WARNING']}; font-size: 17px; font-weight: 700;"
+        )
+
+        # Render workloads.
+        self.workloads_tree.clear()
+        for w in sorted(workloads, key=lambda x: (x["namespace"], x["kind"], x["name"])):
+            desired = w["desired"]
+            ready = w["ready"]
+            available = w["available"]
+            updated = w["updated"]
+            unavailable = w["unavailable"]
+            item = QTreeWidgetItem([
+                w["kind"], w["namespace"], w["name"],
+                f"{ready}/{desired}", desired, available, updated, unavailable,
+                _short_age(w["created"])
+            ])
+            try:
+                ready_n, desired_n = int(ready), int(desired)
+                healthy = desired_n > 0 and ready_n >= desired_n
+                item.setForeground(3, QColor(T["SUCCESS"] if healthy else T["WARNING"]))
+            except ValueError:
+                pass
+            if unavailable not in ("", "0"):
+                item.setForeground(7, QColor(T["DANGER"]))
+            self.workloads_tree.addTopLevelItem(item)
+        for col in range(9):
+            self.workloads_tree.resizeColumnToContents(col)
+
+        # Render services.
+        self.services_tree.clear()
+        for s in sorted(services, key=lambda x: (x["namespace"], x["name"])):
+            item = QTreeWidgetItem([
+                s["name"], s["namespace"], s["type"], s["cluster_ip"],
+                s["external"], s["ports"], s["endpoints"], _short_age(s["created"])
+            ])
+            ep = s["endpoints"]
+            if ep.startswith("0"):
+                item.setForeground(6, QColor(T["DANGER"]))
+            elif "not ready" in ep:
+                item.setForeground(6, QColor(T["WARNING"]))
+            else:
+                item.setForeground(6, QColor(T["SUCCESS"]))
+            self.services_tree.addTopLevelItem(item)
+        for col in range(8):
+            self.services_tree.resizeColumnToContents(col)
+
+        # Render events. Keep warnings/errors visually prominent.
+        self.events_tree.clear()
+        for e in reversed(events):
+            item = QTreeWidgetItem([
+                e["timestamp"][11:19] if len(e["timestamp"]) >= 19 else e["timestamp"],
+                e["type"], e["reason"], e["object"], e["namespace"], e["message"]
+            ])
+            event_type = e["type"].lower()
+            item.setForeground(1, QColor(
+                T["DANGER"] if event_type == "warning" else T["SUCCESS"]
+            ))
+            item.setToolTip(5, f"{e['reason']}: {e['message']}")
+            self.events_tree.addTopLevelItem(item)
+        for col in range(6):
+            self.events_tree.resizeColumnToContents(col)
+        if self.events_tree.topLevelItemCount() > 0:
+            self.events_tree.scrollToTop()
 
         for line in node_lines:
             parts = line.split()
@@ -1357,7 +1782,7 @@ class DashboardTab(QWidget):
             card = self._get_or_create_node_card(name)
             card.update_data(status, roles, cpu_pct, mem_pct,
                               len(node_pods), pressure_text, pressure_ok,
-                              cpu_tip, mem_tip)
+                              cpu_tip, mem_tip, node_info.get(name, {}))
             _node_order.append(name)
 
         # Anything left in pods_by_node belongs to a node that either
