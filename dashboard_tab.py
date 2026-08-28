@@ -847,7 +847,7 @@ class DashboardTab(QWidget):
         # section width as the window is resized (see _rescale_node_cards).
         self.k8s_grid_container = _NodeGridContainer()
         self.k8s_grid = QGridLayout(self.k8s_grid_container)
-        self.k8s_grid.setContentsMargins(0, 0, 0, 0)
+        self.k8s_grid.setContentsMargins(0, 20, 0, 0)
         self.k8s_grid.setHorizontalSpacing(16)
         self.k8s_grid.setVerticalSpacing(16)
         # Cards are square and fixed-size at any given moment, so the card
