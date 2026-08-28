@@ -25,8 +25,11 @@ dashboard tick (piggy-backing on the same SSH round-trip the main tab
 already makes — no extra polling), rather than issuing its own SSH calls.
 """
 
+import json
+import os
 import re
 import time
+from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
@@ -35,7 +38,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (
     Qt, QTimer, pyqtSignal, QVariantAnimation, QEasingCurve,
 )
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QPainter, QPen
 
 from themes import T
 from workers import CommandWorker, track_worker
@@ -166,6 +169,57 @@ fi
 # and got parsed as such. Suppressing stderr means an unreachable cluster
 # now simply yields empty stdout, which the no-cluster check below already
 # treats correctly.
+
+
+class HistoryChart(QWidget):
+    """Small, dependency-free line chart for dashboard history."""
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.points = []
+        self.setMinimumHeight(150)
+
+    def set_points(self, points):
+        self.points = [(str(t), float(v)) for t, v in points if v is not None]
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(T["BG_ITEM"]))
+        p.setPen(QColor(T["TEXT_MUTED"]))
+        p.drawText(10, 20, self.title)
+        if not self.points:
+            p.drawText(10, 45, "Collecting data…")
+            return
+        left, top, right, bottom = 38, 30, 10, 24
+        w = max(1, self.width() - left - right)
+        h = max(1, self.height() - top - bottom)
+        vals = [v for _, v in self.points]
+        lo, hi = min(vals), max(vals)
+        if hi == lo:
+            pad = max(1, abs(hi) * .05)
+            lo, hi = lo - pad, hi + pad
+        p.setPen(QPen(QColor(T["BORDER"]), 1))
+        for i in range(5):
+            y = top + int(h * i / 4)
+            p.drawLine(left, y, left + w, y)
+        p.setPen(QColor(T["TEXT_MUTED"]))
+        p.drawText(3, top + 4, f"{hi:.0f}")
+        p.drawText(3, top + h, f"{lo:.0f}")
+        pen = QPen(QColor(T["ACCENT"]), 2)
+        p.setPen(pen)
+        n = max(1, len(self.points) - 1)
+        prev = None
+        for i, (_, value) in enumerate(self.points):
+            x = left + int(w * i / n)
+            y = top + int((hi - value) / (hi - lo) * h)
+            if prev:
+                p.drawLine(prev[0], prev[1], x, y)
+            prev = (x, y)
+        p.setPen(QColor(T["TEXT_MUTED"]))
+        p.drawText(left, self.height() - 6, self.points[0][0])
+        p.drawText(max(left, self.width() - 55), self.height() - 6, self.points[-1][0])
 
 
 def _split_sections(out: str) -> dict:
@@ -819,6 +873,15 @@ class DashboardTab(QWidget):
         # refresh tick.
         self._card_grid_pos = {}
 
+        # Phase 7 history: one lightweight JSON file, sampled once per minute.
+        self._history_file = os.path.join(os.path.expanduser("~"), ".ec2_manager_dashboard_history.json")
+        self._history = self._load_history()
+        self._last_history_time = 0
+        self._history_cpu_limit = 85
+        self._history_mem_limit = 85
+        self._history_restart_limit = 5
+        self._history_pending_limit = 1
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
 
@@ -1070,6 +1133,38 @@ class DashboardTab(QWidget):
         self.k8s_card["body"].addWidget(self.k8s_grid_container)
         self._content_layout.addWidget(self.k8s_card["frame"])
 
+        # ── Phase 7: historical monitoring ──────────────────────
+        self.history_card = self._make_card("📈  Historical Monitoring")
+        hb = self.history_card["body"]
+        self.history_status = QLabel("Collecting history…")
+        self.history_status.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        hb.addWidget(self.history_status)
+
+        grid = QGridLayout()
+        self.history_cpu = HistoryChart("Average node CPU (%)")
+        self.history_mem = HistoryChart("Average node memory (%)")
+        self.history_pods = HistoryChart("Total pods")
+        self.history_nodes = HistoryChart("Ready nodes")
+        grid.addWidget(self.history_cpu, 0, 0)
+        grid.addWidget(self.history_mem, 0, 1)
+        grid.addWidget(self.history_pods, 1, 0)
+        grid.addWidget(self.history_nodes, 1, 1)
+        hb.addLayout(grid)
+
+        self.history_alerts = QLabel("Alerts: none")
+        self.history_alerts.setWordWrap(True)
+        self.history_alerts.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        hb.addWidget(self.history_alerts)
+
+        self.history_events = QTreeWidget()
+        self.history_events.setHeaderLabels(["Time", "Type", "Reason", "Object", "Namespace", "Message"])
+        self._style_tree(self.history_events)
+        self.history_events.setMinimumHeight(120)
+        self.history_events.setMaximumHeight(240)
+        hb.addWidget(self.history_events)
+        self._content_layout.addWidget(self.history_card["frame"])
+
+        self._render_history()
         self._content_layout.addStretch()
         scroll.setWidget(content)
         root.addWidget(scroll)
@@ -1079,6 +1174,7 @@ class DashboardTab(QWidget):
         self.workloads_card["frame"].hide()
         self.services_card["frame"].hide()
         self.events_card["frame"].hide()
+        self.history_card["frame"].hide()
         self.k8s_card["frame"].hide()
 
         self._apply_styles()
@@ -1259,6 +1355,7 @@ class DashboardTab(QWidget):
         self.workloads_card["frame"].hide()
         self.services_card["frame"].hide()
         self.events_card["frame"].hide()
+        self.history_card["frame"].hide()
         self.k8s_card["frame"].hide()
         self.updated_lbl.setText("")
         self._update_live_label()
@@ -1270,6 +1367,7 @@ class DashboardTab(QWidget):
         self.workloads_card["frame"].show()
         self.services_card["frame"].show()
         self.events_card["frame"].show()
+        self.history_card["frame"].show()
         self.k8s_card["frame"].show()
         self._update_live_label()
 
@@ -1751,6 +1849,8 @@ class DashboardTab(QWidget):
         if self.events_tree.topLevelItemCount() > 0:
             self.events_tree.scrollToTop()
 
+        self._record_history(node_lines, top, pods_by_node, events)
+
         for line in node_lines:
             parts = line.split()
             if len(parts) < 5:
@@ -1825,6 +1925,103 @@ class DashboardTab(QWidget):
 
     def _on_node_window_closed(self, node_name: str):
         self._node_windows.pop(node_name, None)
+
+    # ── Phase 7: historical monitoring ─────────────────────────
+    def _load_history(self):
+        try:
+            with open(self._history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data[-500:] if isinstance(data, list) else []
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def _save_history(self):
+        try:
+            tmp = self._history_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._history[-500:], f, separators=(",", ":"))
+            os.replace(tmp, self._history_file)
+        except OSError:
+            pass
+
+    def _record_history(self, node_lines, top, pods_by_node, events):
+        now = time.time()
+        if now - self._last_history_time < 60:
+            return
+        self._last_history_time = now
+
+        cpu = []
+        mem = []
+        for value in top.values():
+            try: cpu.append(float(value.get("cpu_pct")))
+            except (TypeError, ValueError): pass
+            try: mem.append(float(value.get("mem_pct")))
+            except (TypeError, ValueError): pass
+
+        pods = [p for rows in pods_by_node.values() for p in rows]
+        ready = sum(
+            1 for line in node_lines
+            if len(line.split()) >= 2 and line.split()[1].lower().split(",", 1)[0] == "ready"
+        )
+        sample = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cpu": round(sum(cpu) / len(cpu), 1) if cpu else None,
+            "memory": round(sum(mem) / len(mem), 1) if mem else None,
+            "pods": len(pods),
+            "ready_nodes": ready,
+            "restarts": sum(p.get("restarts", 0) for p in pods),
+            "pending": sum(1 for p in pods if p.get("phase", "").lower() == "pending"),
+            "events": events[-20:],
+        }
+        self._history.append(sample)
+        self._history = self._history[-500:]
+        self._save_history()
+        self._render_history()
+
+    def _render_history(self):
+        rows = self._history[-120:]
+        self.history_cpu.set_points([(x["time"][11:16], x.get("cpu")) for x in rows])
+        self.history_mem.set_points([(x["time"][11:16], x.get("memory")) for x in rows])
+        self.history_pods.set_points([(x["time"][11:16], x.get("pods")) for x in rows])
+        self.history_nodes.set_points([(x["time"][11:16], x.get("ready_nodes")) for x in rows])
+
+        self.history_events.clear()
+        seen = set()
+        for row in reversed(rows):
+            for e in reversed(row.get("events", [])):
+                key = (row["time"], e.get("reason"), e.get("object"), e.get("message"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                item = QTreeWidgetItem([
+                    row["time"], e.get("type", "Normal"), e.get("reason", "—"),
+                    e.get("object", "—"), e.get("namespace", "—"), e.get("message", "—")
+                ])
+                item.setForeground(1, QColor(
+                    T["DANGER"] if e.get("type", "").lower() == "warning" else T["SUCCESS"]
+                ))
+                self.history_events.addTopLevelItem(item)
+        for col in range(6):
+            self.history_events.resizeColumnToContents(col)
+
+        self.history_status.setText(
+            f"{len(self._history)} samples · 1 minute interval · last 500 samples kept"
+        )
+        if rows:
+            latest = rows[-1]
+            alerts = []
+            if latest.get("cpu") is not None and latest["cpu"] >= self._history_cpu_limit:
+                alerts.append(f"CPU {latest['cpu']}%")
+            if latest.get("memory") is not None and latest["memory"] >= self._history_mem_limit:
+                alerts.append(f"Memory {latest['memory']}%")
+            if latest.get("restarts", 0) >= self._history_restart_limit:
+                alerts.append(f"Restarts {latest['restarts']}")
+            if latest.get("pending", 0) >= self._history_pending_limit:
+                alerts.append(f"Pending pods {latest['pending']}")
+            self.history_alerts.setText("Alerts: " + (", ".join(alerts) if alerts else "none"))
+            self.history_alerts.setStyleSheet(
+                f"color: {T['DANGER'] if alerts else T['TEXT_MUTED']}; font-size: 12px;"
+            )
 
     def _on_k8s_error(self, err: str):
         self._busy = False
