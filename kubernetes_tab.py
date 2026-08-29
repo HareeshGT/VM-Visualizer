@@ -822,6 +822,7 @@ class KubernetesTab(QWidget):
         lay.setSpacing(0)
 
         self.k8s_ai_ops = K8sAIOpsWidget(
+            kube_context_getter=lambda: self._current_context,
             ssh=self.ssh,
             namespace_getter=lambda: self._current_ns,
             context_getter=self._ai_ops_context,
@@ -2419,7 +2420,7 @@ class KubernetesTab(QWidget):
     def _pod_logs(self):
         pod, ns = self._selected_pod()
         if pod:
-            LogViewerDialog(self, self.ssh, ns, pod).exec_()
+            LogViewerDialog(self, self.ssh, ns, pod, context=self._current_context).exec_()
 
     # ── Inline "✨ AI" button on troubled pod cards ─────────────
     # Same diagnosis flow as LogViewerDialog's "Analyze with AI" button
@@ -2538,11 +2539,13 @@ class KubernetesTab(QWidget):
         # Same trailing-quote defensiveness as _populate_namespaces.
         containers = out.strip().strip("'").split()
         if len(containers) <= 1:
-            ExecDialog(self, self.ssh, ns, pod, containers[0] if containers else None).exec_()
+            ExecDialog(self, self.ssh, ns, pod, containers[0] if containers else None,
+                       context=self._current_context).exec_()
             return
         dlg = ContainerPickerDialog(self, pod, containers)
         if dlg.exec_() == QDialog.Accepted:
-            ExecDialog(self, self.ssh, ns, pod, dlg.selected_container()).exec_()
+            ExecDialog(self, self.ssh, ns, pod, dlg.selected_container(),
+                       context=self._current_context).exec_()
 
     def _pod_delete(self):
         pod, ns = self._selected_pod()
@@ -2568,7 +2571,7 @@ class KubernetesTab(QWidget):
         pod  = meta.get("name")
         ns   = meta.get("namespace") or "default"
         menu = QMenu(self)
-        menu.addAction("📋  View Logs",  lambda: LogViewerDialog(self, self.ssh, ns, pod).exec_())
+        menu.addAction("📋  View Logs",  lambda: LogViewerDialog(self, self.ssh, ns, pod, context=self._current_context).exec_())
         menu.addAction("💻  Exec Shell", lambda: self._exec_pod(pod, ns))
         menu.addAction("📄  Describe",   lambda: self._describe("pod", pod, ns))
         menu.addSeparator()

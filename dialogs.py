@@ -642,12 +642,18 @@ class LogViewerDialog(QDialog):
     keep pushing new lines into the view as they arrive over SSH, rather
     than requiring the user to click Refresh."""
 
-    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
+    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None,
+                 context: str = None):
         super().__init__(parent)
         self.ssh            = ssh
         self._pod           = pod
         self._ns            = namespace
         self._container     = container
+        # kubectl context to target (e.g. from the Kubernetes tab's context
+        # switcher). Without this, kubectl falls back to whatever context is
+        # current on the remote machine's kubeconfig, silently ignoring
+        # whichever cluster is selected in the UI.
+        self._ctx_flag      = f"--context {shlex.quote(context)} " if (context or "").strip() else ""
         self._workers       = []
         self._stream_worker = None   # the currently-running _ExecStreamWorker, if any
         self._ai_worker     = None   # the currently-running AIExplainWorker, if any
@@ -720,7 +726,7 @@ class LogViewerDialog(QDialog):
         prev = "--previous" if self.prev_chk.isChecked() else ""
         c    = f"-c {self._container}" if self._container else ""
         f    = "-f" if follow else ""
-        inner = f"kubectl logs --tail={n} -n {self._ns} {prev} {c} {f} {self._pod} 2>&1"
+        inner = f"kubectl logs {self._ctx_flag}--tail={n} -n {self._ns} {prev} {c} {f} {self._pod} 2>&1"
         # exec_command() opens a non-login shell, which skips /etc/profile —
         # exactly where kubectl's PATH entry usually lives (Homebrew, snap,
         # etc.). "bash -lc" forces a login shell so those get sourced.
@@ -884,7 +890,8 @@ class ContainerPickerDialog(QDialog):
 
 
 class ExecDialog(QDialog):
-    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
+    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None,
+                 context: str = None):
         super().__init__(parent)
         self.ssh        = ssh
         self._pod       = pod
@@ -892,6 +899,10 @@ class ExecDialog(QDialog):
         self._container = container
         self._cwd       = None
         self._workers   = []
+        # Same rationale as LogViewerDialog: without this, kubectl exec
+        # silently runs against the remote machine's current kubeconfig
+        # context instead of whichever cluster is selected in the UI.
+        self._ctx_flag  = f"--context {shlex.quote(context)} " if (context or "").strip() else ""
 
         # State for the "Analyze with AI" AI feature — the last command run
         # (not counting `cd`, which has its own distinct failure message
@@ -962,7 +973,7 @@ class ExecDialog(QDialog):
                 prefix = f"cd '{self._cwd}' && " if self._cwd else ""
                 resolve_cmd = f"{prefix}cd '{target}' 2>/dev/null && pwd || echo __FAIL__"
             safe = resolve_cmd.replace("'", "'\\''")
-            full = f"kubectl exec -n {self._ns} {self._pod} {c} -- sh -c '{safe}' 2>&1"
+            full = f"kubectl exec {self._ctx_flag}-n {self._ns} {self._pod} {c} -- sh -c '{safe}' 2>&1"
             append_terminal_html(self.output, f"\n<span style='color:{T['ACCENT2']}'>$ {html_escape(cmd)}</span>")
             worker = CommandWorker(self.ssh, full)
             worker.done.connect(self._handle_cd_result)
@@ -973,7 +984,7 @@ class ExecDialog(QDialog):
             return
 
         safe_cmd = (f"cd '{self._cwd}' && {cmd}" if self._cwd else cmd).replace("'", "'\\''")
-        full = f"kubectl exec -n {self._ns} {self._pod} {c} -- sh -c '{safe_cmd}' 2>&1"
+        full = f"kubectl exec {self._ctx_flag}-n {self._ns} {self._pod} {c} -- sh -c '{safe_cmd}' 2>&1"
         append_terminal_html(self.output, f"\n<span style='color:{T['ACCENT2']}'>$ {html_escape(cmd)}</span>")
         worker = CommandWorker(self.ssh, full)
         worker.result.connect(lambda out, err, code, cmd=cmd: self._on_cmd_result(cmd, out, err, code))

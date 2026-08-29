@@ -1057,11 +1057,18 @@ class K8sAIOpsWidget(QWidget):
 
     operation_finished = pyqtSignal()
 
-    def __init__(self, ssh=None, namespace_getter=None, context_getter=None, parent=None):
+    def __init__(self, ssh=None, namespace_getter=None, context_getter=None,
+                 kube_context_getter=None, parent=None):
         super().__init__(parent)
         self.ssh = ssh
         self._namespace_getter = namespace_getter
+        # NOTE: context_getter feeds free-text UI context ("Selected pod: ...")
+        # into the AI prompt only — it is NOT a kubectl context name and must
+        # never be used to build a `--context` flag. kube_context_getter is
+        # the actual selected cluster context (e.g. from the context combo)
+        # and is what build_kubectl_command()/`--context` needs.
         self._context_getter = context_getter
+        self._kube_context_getter = kube_context_getter
         self._workers = []
         self._ai_worker = None
         self._operation_worker = None
@@ -1345,6 +1352,18 @@ class K8sAIOpsWidget(QWidget):
         if self._context_getter:
             try:
                 value = self._context_getter()
+                return str(value or "").strip()
+            except Exception:
+                pass
+        return ""
+
+    def _kube_context(self) -> str:
+        """The actually-selected kubectl context (cluster), used for the
+        `--context` flag. Distinct from `_context()`, which is a free-text
+        UI blurb fed to the AI prompt and must never reach the shell."""
+        if self._kube_context_getter:
+            try:
+                value = self._kube_context_getter()
                 return str(value or "").strip()
             except Exception:
                 pass
@@ -1790,7 +1809,7 @@ class K8sAIOpsWidget(QWidget):
 
     def _execute_action(self, action: dict):
         description = operation_description(action)
-        action["context"] = self._context()
+        action["context"] = self._kube_context()
         is_relative_scale = (
             action["action"] == "scale" and action.get("mode") == "relative"
         )
