@@ -60,6 +60,9 @@ class KubernetesTab(QWidget):
         super().__init__(parent)
         self.ssh          = None
         self._current_ns  = "default"
+        self._current_context = ""
+        self._contexts = []
+        self._contexts_pending_select = None
         self._namespaces  = []
         self._namespaces_pending_select = None
         self._workers     = []
@@ -97,6 +100,55 @@ class KubernetesTab(QWidget):
         self._tunnel_csv_path = load_settings().get("tunnel_csv_path") or REMOTE_TUNNEL_CSV_PATH
         self._build_ui()
 
+    # ── Kubernetes context helpers ───────────────────────────
+    def _context_flag(self) -> str:
+        context = (self._current_context or "").strip()
+        return f"--context {shlex.quote(context)}" if context else ""
+
+    def _apply_context_to_command(self, cmd: str) -> str:
+        """Apply the selected context to a kubectl command."""
+        if not cmd or not self._current_context:
+            return cmd
+        stripped = cmd.lstrip()
+        if not re.match(r"^kubectl(?:\s|$)", stripped):
+            return cmd
+        if re.search(r"(?:^|\s)--context(?:=|\s)", stripped):
+            return cmd
+        prefix_len = len(cmd) - len(stripped)
+        return cmd[:prefix_len] + "kubectl " + self._context_flag() + stripped[len("kubectl"): ]
+
+    def _load_contexts(self):
+        self._run_cmd("kubectl config get-contexts -o name", self._populate_contexts, apply_context=False)
+
+    def _populate_contexts(self, out: str):
+        contexts = [x.strip() for x in (out or "").splitlines() if x.strip()]
+        self._contexts = contexts
+        current = self._current_context
+        self.context_combo.blockSignals(True)
+        self.context_combo.clear()
+        self.context_combo.addItems(contexts)
+        chosen = current if current in contexts else (contexts[0] if contexts else "")
+        if chosen:
+            self.context_combo.setCurrentText(chosen)
+            self._current_context = chosen
+        self.context_combo.blockSignals(False)
+        if self._current_context:
+            self._load_namespaces()
+
+    def _on_context_change(self, context: str):
+        context = (context or "").strip()
+        if not context or context == self._current_context:
+            return
+        self._current_context = context
+        self._current_ns = "default"
+        self.ns_combo.blockSignals(True)
+        self.ns_combo.clear()
+        self.ns_combo.addItem("Loading…")
+        self.ns_combo.blockSignals(False)
+        self.health_lbl.setText("● Switching cluster…")
+        self.health_lbl.setStyleSheet(f"color: {T['WARNING']}; font-size: 12px;")
+        self._load_namespaces()
+
     # ── Local connection info (for tunnelling) ────────────────
     def set_connection_info(self, host, port, user, pem):
         self._conn_host = host
@@ -121,7 +173,7 @@ class KubernetesTab(QWidget):
             self.k8s_ai_ops.set_ssh(ssh)
 
         if ssh:
-            self._load_namespaces()
+            self._load_contexts()
             self._load_tunnel_csv()      # Load from this VM
         else:
             self._clear_all()
@@ -145,6 +197,39 @@ class KubernetesTab(QWidget):
         cb = QHBoxLayout(self.ctrl_bar)
         cb.setContentsMargins(12, 0, 12, 0)
         cb.setSpacing(10)
+
+        # Kubernetes context picker — a jump host can have multiple clusters.
+        self.context_group = QWidget()
+        self.context_group.setObjectName("context_group")
+        self.context_group.setFixedHeight(40)
+        ctx_row = QHBoxLayout(self.context_group)
+        ctx_row.setContentsMargins(14, 0, 8, 0)
+        ctx_row.setSpacing(9)
+        self.context_dot = QLabel("●")
+        self.context_dot.setStyleSheet(f"color: {T['ACCENT2']}; font-size: 11px; background: transparent;")
+        ctx_row.addWidget(self.context_dot)
+        ctx_lbl = QLabel("CLUSTER")
+        ctx_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; background: transparent;")
+        ctx_row.addWidget(ctx_lbl)
+        self.context_combo = QComboBox()
+        self.context_combo.setObjectName("context_combo")
+        self.context_combo.setMinimumWidth(190)
+        self.context_combo.setFixedHeight(30)
+        self.context_combo.setMaxVisibleItems(12)
+        self.context_combo.setEditable(True)
+        self.context_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.context_combo.completer().setCompletionMode(QCompleter.PopupCompletion)
+        self.context_combo.completer().setFilterMode(Qt.MatchContains)
+        self.context_combo.currentTextChanged.connect(self._on_context_change)
+        ctx_row.addWidget(self.context_combo)
+        self._style_context_group()
+        cb.addWidget(self.context_group)
+        self.context_refresh_btn = self._toolbar_btn("↻", tooltip="Refresh Kubernetes contexts")
+        self.context_refresh_btn.setFixedWidth(34)
+        self.context_refresh_btn.clicked.connect(self._load_contexts)
+        cb.addWidget(self.context_refresh_btn)
+
+        cb.addWidget(self._vline())
 
         # Namespace picker, grouped into one rounded "chip" (dot + label +
         # combo sharing a pill background) instead of three bare widgets
@@ -248,6 +333,16 @@ class KubernetesTab(QWidget):
         f.setFixedWidth(1)
         return f
 
+    def _style_context_group(self):
+        self.context_group.setStyleSheet(
+            f"QWidget#context_group {{ background: {T['BG_ITEM']}; border: 1px solid {T['BORDER']}; border-radius: 20px; }}"
+        )
+        self.context_combo.setStyleSheet(
+            f"QComboBox#context_combo {{ background: {T['BG_PANEL']}; color: {T['TEXT_PRIMARY']}; border: 1.5px solid {T['ACCENT2']}; border-radius: 15px; padding: 2px 30px 2px 14px; font-size: 13px; font-weight: 600; min-width: 190px; }}"
+            f"QComboBox#context_combo:hover {{ border-color: {T['ACCENT']}; background: {T['BG_HOVER']}; }}"
+            f"QComboBox#context_combo::drop-down {{ border: none; width: 26px; }}"
+        )
+
     def _style_ns_group(self):
         """Pill chip around the namespace picker + a bigger, bolder combo
         box than the app-wide default. Set directly on the two widgets
@@ -256,6 +351,7 @@ class KubernetesTab(QWidget):
         most-used control on the tab, gets the larger treatment. Re-called
         from apply_theme() on every theme switch since the colours below
         are baked in as literal hex at call time."""
+        self._style_context_group()
         self.ns_group.setStyleSheet(
             f"QWidget#ns_group {{ background: {T['BG_ITEM']}; "
             f"border: 1px solid {T['BORDER']}; border-radius: 20px; }}"
@@ -2162,6 +2258,9 @@ class KubernetesTab(QWidget):
         self._events_raw = ""
         if getattr(self, "event_warn_btn", None) is not None:
             self.event_warn_btn.setChecked(False)
+        self.context_combo.clear()
+        self._contexts = []
+        self._current_context = ""
         self.ns_combo.clear()
         self.health_lbl.setText("● Cluster")
         self.health_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
@@ -2367,7 +2466,7 @@ class KubernetesTab(QWidget):
         # mirror it here rather than re-deriving it from restarts alone.
         use_previous = "crash" in status.lower()
         prev = "--previous" if use_previous else ""
-        inner = f"kubectl logs --tail=200 -n {ns} {prev} {pod} 2>&1"
+        inner = f"kubectl {self._context_flag()} logs --tail=200 -n {ns} {prev} {pod} 2>&1".replace("kubectl  logs", "kubectl logs")
         cmd = f"bash -lc {shlex.quote(inner)}"
 
         worker = CommandWorker(self.ssh, cmd)
@@ -3899,8 +3998,7 @@ class KubernetesTab(QWidget):
                 f'pid=$(lsof -ti:{port} 2>/dev/null); [ -n "$pid" ] && kill -9 $pid'
             )
             cmds.append(
-                f"nohup kubectl -n {ns} port-forward svc/{name} "
-                f"{port}:{container_port} > /dev/null 2>&1 &"
+                f"nohup kubectl {self._context_flag()} -n {ns} port-forward svc/{name} {port}:{container_port} > /dev/null 2>&1 &"
             )
 
         # ';' not '&&' — the kill script may exit nonzero if nothing was listening
@@ -4016,9 +4114,11 @@ class KubernetesTab(QWidget):
         QTimer.singleShot(1200, self._refresh_tunnel_status)
 
     # ── Worker runner ─────────────────────────────────────────
-    def _run_cmd(self, cmd: str, callback):
+    def _run_cmd(self, cmd: str, callback, apply_context: bool = True):
         if not self.ssh:
             return
+        if apply_context:
+            cmd = self._apply_context_to_command(cmd)
         self.progress.show()
         worker = CommandWorker(self.ssh, cmd)
 

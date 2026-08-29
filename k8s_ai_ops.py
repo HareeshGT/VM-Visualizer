@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 import os
 import sys
+import shlex
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -992,7 +993,9 @@ def build_kubectl_command(action: dict) -> str:
     resource = action["resource"]
     name = action["name"]
     namespace = action["namespace"]
-    base = f"kubectl -n {namespace}"
+    context = str(action.get("context") or "").strip()
+    context_flag = f"--context {shlex.quote(context)} " if context else ""
+    base = f"kubectl {context_flag}-n {namespace}"
 
     if operation == "scale":
         if "replicas" not in action:
@@ -1787,6 +1790,7 @@ class K8sAIOpsWidget(QWidget):
 
     def _execute_action(self, action: dict):
         description = operation_description(action)
+        action["context"] = self._context()
         is_relative_scale = (
             action["action"] == "scale" and action.get("mode") == "relative"
         )
@@ -1880,7 +1884,7 @@ class K8sAIOpsWidget(QWidget):
         namespace = action["namespace"]
 
         probe = (
-            f"kubectl -n {namespace} get {resource}/{name} "
+            f"kubectl {((f"--context {shlex.quote(str(action.get("context") or ""))} ") if action.get("context") else "")} -n {namespace} get {resource}/{name} "
             f"-o jsonpath={{.spec.replicas}}"
         )
 
