@@ -25,6 +25,7 @@ import sys
 import shlex
 
 from PyQt5.QtWidgets import (
+    QDialogButtonBox,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
