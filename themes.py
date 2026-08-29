@@ -68,12 +68,12 @@ THEMES = {
         "SUCCESS": "#a3e635", "DANGER": "#f87171", "WARNING": "#fbbf24", "INFO": "#60a5fa",
     },
 
-    "Blood Moon": {
-        "BG_DARK": "#0d0605", "BG_PANEL": "#170a08", "BG_SIDEBAR": "#0a0403",
-        "BG_ITEM": "#241110", "BG_ITEM_SEL": "#6b1414", "BG_HOVER": "#301715",
-        "ACCENT": "#dc2626", "ACCENT2": "#f87171", "TEXT_PRIMARY": "#fef2f2",
-        "TEXT_DIM": "#f0c2c2", "TEXT_MUTED": "#b08484", "BORDER": "#3d1a1a",
-        "SUCCESS": "#4ade80", "DANGER": "#dc2626", "WARNING": "#fbbf24", "INFO": "#60a5fa",
+    "Snow Light": {
+        "BG_DARK": "#f5f5f7", "BG_PANEL": "#ffffff", "BG_SIDEBAR": "#eceef2",
+        "BG_ITEM": "#f0f1f4", "BG_ITEM_SEL": "#dbe4fe", "BG_HOVER": "#e6e9ee",
+        "ACCENT": "#2563eb", "ACCENT2": "#3b82f6", "TEXT_PRIMARY": "#1c1c1e",
+        "TEXT_DIM": "#4b5563", "TEXT_MUTED": "#9ca3af", "BORDER": "#d1d5db",
+        "SUCCESS": "#16a34a", "DANGER": "#dc2626", "WARNING": "#d97706", "INFO": "#2563eb",
     },
 }
 
@@ -204,7 +204,7 @@ def build_qss() -> str:
         padding: 6px;
         outline: none;
         selection-background-color: {c['BG_ITEM_SEL']};
-        selection-color: white;
+        selection-color: {c['TEXT_PRIMARY']};
     }}
     QComboBox QAbstractItemView::item {{
         min-height: 28px;
@@ -223,14 +223,14 @@ def build_qss() -> str:
     QListWidget {{ background: {c['BG_DARK']}; border: none; outline: none; }}
     QListWidget::item {{ border-radius: 6px; padding: 0px; margin: 0px; color: {c['TEXT_PRIMARY']}; }}
     QListWidget::item:hover    {{ background: {c['BG_HOVER']}; }}
-    QListWidget::item:selected {{ background: {c['BG_ITEM_SEL']}; color: white; }}
+    QListWidget::item:selected {{ background: {c['BG_ITEM_SEL']}; color: {c['TEXT_PRIMARY']}; }}
     QTreeWidget {{
         background: {c['BG_DARK']}; color: {c['TEXT_PRIMARY']};
         border: none; outline: none; alternate-background-color: {c['BG_PANEL']};
     }}
     QTreeWidget::item {{ padding: 4px 2px; border-radius: 4px; }}
     QTreeWidget::item:hover    {{ background: {c['BG_HOVER']}; }}
-    QTreeWidget::item:selected {{ background: {c['BG_ITEM_SEL']}; color: white; }}
+    QTreeWidget::item:selected {{ background: {c['BG_ITEM_SEL']}; color: {c['TEXT_PRIMARY']}; }}
     QTreeWidget::branch {{ background: {c['BG_DARK']}; }}
     QHeaderView::section {{
         background: {c['BG_PANEL']}; color: {c['TEXT_MUTED']};
@@ -242,7 +242,7 @@ def build_qss() -> str:
         border: none; outline: none; gridline-color: {c['BORDER']};
     }}
     QTableWidget::item {{ padding: 4px 8px; }}
-    QTableWidget::item:selected {{ background: {c['BG_ITEM_SEL']}; color: white; }}
+    QTableWidget::item:selected {{ background: {c['BG_ITEM_SEL']}; color: {c['TEXT_PRIMARY']}; }}
     QTextEdit {{
         background: {c['BG_PANEL']}; color: {c['TEXT_PRIMARY']}; border: none;
         font-family: 'Cascadia Code','SF Mono','Menlo','Consolas','Fira Code','DejaVu Sans Mono',monospace;
@@ -318,7 +318,7 @@ def build_qss() -> str:
     }}
     QListWidget#recent_list::item {{ border-radius: 6px; padding: 6px 10px; margin: 2px 4px; color: {c['TEXT_PRIMARY']}; }}
     QListWidget#recent_list::item:hover    {{ background: {c['BG_HOVER']}; }}
-    QListWidget#recent_list::item:selected {{ background: {c['BG_ITEM_SEL']}; color: white; }}
+    QListWidget#recent_list::item:selected {{ background: {c['BG_ITEM_SEL']}; color: {c['TEXT_PRIMARY']}; }}
 """
 
 

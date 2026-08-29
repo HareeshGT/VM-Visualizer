@@ -29,6 +29,7 @@ import json
 import os
 import re
 import time
+import shlex
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -849,6 +850,7 @@ class DashboardTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.ssh      = None
+        self._kube_context = ""
         self._active  = False
         self._busy    = False
         self._workers = []
@@ -889,6 +891,16 @@ class DashboardTab(QWidget):
         self._show_disconnected()
 
     # ── Public API ──────────────────────────────────────────
+    def set_kube_context(self, context):
+        """Follow the Kubernetes tab's selected context without changing
+        the jump host's global kubectl current-context."""
+        context = str(context or "").strip()
+        if context == self._kube_context:
+            return
+        self._kube_context = context
+        if self._active and self.ssh:
+            self._refresh()
+
     def set_ssh(self, ssh):
         self.ssh = ssh
         if ssh:
@@ -1372,6 +1384,16 @@ class DashboardTab(QWidget):
         self._update_live_label()
 
     # ── Refresh ────────────────────────────────────────────────
+    def _contextual_k8s_command(self) -> str:
+        """Bind every kubectl invocation in the dashboard snapshot to the
+        selected context. The `=value` form is deliberate: context names are
+        allowed to begin with '-' and must never be parsed as a new flag."""
+        ctx = (self._kube_context or "").strip()
+        if not ctx:
+            return _K8S_CMD
+        flag = f"--context={shlex.quote(ctx)}"
+        return re.sub(r"(^\s*)kubectl(?=\s)", lambda m: m.group(1) + "kubectl " + flag, _K8S_CMD, flags=re.MULTILINE)
+
     def _refresh(self):
         if not self.ssh or self._busy:
             return
@@ -1384,7 +1406,7 @@ class DashboardTab(QWidget):
         track_worker(self._workers, host_worker)
         host_worker.start()
 
-        k8s_worker = CommandWorker(self.ssh, _K8S_CMD)
+        k8s_worker = CommandWorker(self.ssh, self._contextual_k8s_command())
         k8s_worker.done.connect(self._on_k8s_stats)
         k8s_worker.error.connect(self._on_k8s_error)
         track_worker(self._workers, k8s_worker)

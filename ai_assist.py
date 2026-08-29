@@ -494,6 +494,79 @@ def _call_provider(provider_id: str, api_key: str, model: str, prompt: str):
 
 
 # ─── Background workers ──────────────────────────────────────────
+
+
+class AIConversationWorker(QThread):
+    """Background worker for follow-up questions in an AI diagnosis session.
+
+    The worker receives the original evidence plus a short conversation
+    transcript. It is intentionally answer-only: it does not execute commands
+    or gain any Kubernetes access. Live cluster actions remain in the app's
+    existing validated operation pipeline.
+    """
+
+    done = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, provider: str, api_key: str, model: str,
+                 source_context: str, conversation: list, question: str,
+                 parent=None):
+        super().__init__(parent)
+        self._provider = provider
+        self._api_key = api_key
+        self._model = model
+        self._source_context = (source_context or "").strip()
+        self._conversation = list(conversation or [])
+        self._question = (question or "").strip()
+        self.finished.connect(self.deleteLater)
+
+    def run(self):
+        if not self._question:
+            self.error.emit("The follow-up question is empty.")
+            return
+
+        evidence = self._source_context
+        if len(evidence) > MAX_CONTEXT_CHARS:
+            evidence = "…(truncated)…\n" + evidence[-MAX_CONTEXT_CHARS:]
+
+        transcript = []
+        # Keep the conversation bounded so a long diagnosis session does not
+        # consume the entire model context. The original evidence remains
+        # separately available above.
+        for item in self._conversation[-12:]:
+            role = "User" if item.get("role") == "user" else "Assistant"
+            content = str(item.get("content", "")).strip()
+            if content:
+                transcript.append(f"{role}:\n{content}")
+
+        prompt = (
+            "You are continuing an interactive Kubernetes troubleshooting "
+            "session for a DevOps engineer. Answer the user's follow-up based "
+            "only on the supplied diagnosis/evidence and conversation. Do not "
+            "pretend that you ran commands or inspected the cluster. If the "
+            "user asks to check something live, clearly say what command or "
+            "check should be performed rather than claiming it was performed. "
+            "Do not invent facts. Keep the answer concise but useful. Markdown "
+            "is allowed.\n\n"
+            "Original evidence/context:\n"
+            f"{evidence or '(no raw evidence supplied)'}\n\n"
+            "Conversation:\n"
+            f"{'\n\n'.join(transcript) or '(none)'}\n\n"
+            "Current user question:\n"
+            f"{self._question}\n\n"
+            "Answer the current question directly. If useful, distinguish "
+            "between evidence, inference, and a recommended next check."
+        )
+
+        text, err = _call_provider(
+            self._provider, self._api_key, self._model, prompt
+        )
+        if err:
+            self.error.emit(err)
+        else:
+            self.done.emit(text)
+
+
 class AIExplainWorker(QThread):
     """Sends pod log/event text to the selected provider's API and returns
     a plain-English diagnosis. Mirrors workers.CommandWorker's done/error

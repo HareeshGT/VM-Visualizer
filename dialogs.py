@@ -474,166 +474,335 @@ class ConnectingDialog(QDialog):
 # ─── K8s log viewer ───────────────────────────────────────────
 # ─── AI diagnosis result ─────────────────────────────────────
 class AIExplainDialog(QDialog):
-    """Read-only panel showing the AI's diagnosis of a pod's log output."""
+    """Interactive AI diagnosis workspace.
 
-    def __init__(self, parent, title: str):
+    The first response is the original one-shot diagnosis.  After it arrives,
+    the same dialog becomes a small conversation so the user can ask follow-up
+    questions without losing the pod/command evidence that produced the
+    diagnosis.
+    """
+
+    def __init__(self, parent, title: str, source_context: str = ""):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(560, 420)
+        self.resize(760, 620)
         apply_qss_to(self)
+
+        self._source_context = source_context or ""
+        self._diagnosis = ""
+        self._conversation = []
+        self._followup_worker = None
+        self._loading_followup = False
+        self._followup_enabled = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 12)
         layout.setSpacing(10)
 
-        header = QLabel("✨  AI diagnosis")
+        header_row = QHBoxLayout()
+        header = QLabel("✨  AI troubleshooting")
         header.setStyleSheet(
-            f"color: {T['TEXT_PRIMARY']}; font-size: 14px; font-weight: 700;"
+            f"color: {T['TEXT_PRIMARY']}; font-size: 15px; font-weight: 700;"
         )
-        layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addStretch()
+        self.context_lbl = QLabel("Interactive diagnosis")
+        self.context_lbl.setStyleSheet(
+            f"color: {T['TEXT_MUTED']}; font-size: 11px;"
+        )
+        header_row.addWidget(self.context_lbl)
+        layout.addLayout(header_row)
 
         self.body = QTextBrowser()
         self.body.setOpenExternalLinks(True)
         self.body.setStyleSheet(
             f"background: {T['BG_ITEM']}; color: {T['TEXT_PRIMARY']}; "
-            f"border: 1px solid {T['BORDER']}; border-radius: 6px; padding: 10px;"
+            f"border: 1px solid {T['BORDER']}; border-radius: 8px; padding: 12px;"
         )
-
         self.body.document().setDefaultStyleSheet(
             "h1, h2, h3 { margin-top: 14px; margin-bottom: 6px; }"
             "p, ul, ol { margin-top: 4px; margin-bottom: 4px; }"
         )
-
         layout.addWidget(self.body, 1)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        quick_row = QHBoxLayout()
+        quick_row.setSpacing(6)
+        for label, prompt in (
+            ("Why?", "Why do you think this is the likely cause?"),
+            ("Explain evidence", "Explain the evidence behind the diagnosis."),
+            ("What should I check?", "What should I check next?"),
+        ):
+            btn = QPushButton(label)
+            btn.setFixedHeight(30)
+            btn.clicked.connect(lambda _=False, p=prompt: self.ask(p))
+            quick_row.addWidget(btn)
+        quick_row.addStretch()
+        layout.addLayout(quick_row)
 
-        copy_btn = QPushButton("Copy")
-        copy_btn.clicked.connect(
-            lambda: QApplication.clipboard().setText(
-                self.body.toPlainText()
-            )
+        ask_row = QHBoxLayout()
+        ask_row.setSpacing(8)
+        self.question_input = QLineEdit()
+        self.question_input.setPlaceholderText(
+            "Ask a follow-up about this diagnosis…"
         )
-        btn_row.addWidget(copy_btn)
+        self.question_input.returnPressed.connect(self._send_followup)
+        self.question_input.setEnabled(False)
+        ask_row.addWidget(self.question_input, 1)
 
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.setFixedHeight(34)
+        self.send_btn.setEnabled(False)
+        self.send_btn.clicked.connect(self._send_followup)
+        ask_row.addWidget(self.send_btn)
+        layout.addLayout(ask_row)
+
+        btn_row = QHBoxLayout()
+        self.copy_btn = QPushButton("Copy conversation")
+        self.copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.body.toPlainText())
+        )
+        btn_row.addWidget(self.copy_btn)
+        btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setObjectName("primary")
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.close)
         btn_row.addWidget(close_btn)
-
         layout.addLayout(btn_row)
-
-        # ─────────────────────────────────────────────
-        # Thinking animation
-        # ─────────────────────────────────────────────
 
         self._loading_timer = QTimer(self)
         self._loading_timer.timeout.connect(self._update_loading_text)
         self._loading_dots = 0
 
-        # ─────────────────────────────────────────────
-        # Response typing animation
-        # ─────────────────────────────────────────────
-
         self._typing_timer = QTimer(self)
         self._typing_timer.timeout.connect(self._type_next_chunk)
-
         self._response_text = ""
         self._typed_position = 0
 
-    # ─────────────────────────────────────────────────
-    # Thinking animation
-    # ─────────────────────────────────────────────────
+        # Separate timer for follow-up responses so their animation does not
+        # interfere with the initial diagnosis typing state.
+        self._followup_typing_timer = QTimer(self)
+        self._followup_typing_timer.timeout.connect(self._type_followup_chunk)
+        self._followup_response_text = ""
+        self._followup_typed_position = 0
+
+    def set_source_context(self, text: str):
+        self._source_context = (text or "").strip()
 
     def set_loading(self):
-        # Stop anything that might still be running
         self._typing_timer.stop()
         self._loading_timer.stop()
-
         self._loading_dots = 0
-
+        self._followup_enabled = False
+        self.question_input.setEnabled(False)
+        self.send_btn.setEnabled(False)
         self.body.setPlainText("Thinking")
         self._loading_timer.start(400)
 
     def _update_loading_text(self):
         self._loading_dots = (self._loading_dots + 1) % 4
-
-        dots = "." * self._loading_dots
-
-        self.body.setPlainText(f"Thinking{dots}")
+        self.body.setPlainText(f"Thinking{'.' * self._loading_dots}")
 
     def stop_loading(self):
         self._loading_timer.stop()
 
-    # ─────────────────────────────────────────────────
-    # AI response typing effect
-    # ─────────────────────────────────────────────────
-
     def set_markdown(self, text: str):
-        # Stop "Thinking..."
         self.stop_loading()
-
-        # Store the complete response
         self._response_text = text or ""
         self._typed_position = 0
-
-        # Clear previous response
         self.body.clear()
-
         if not self._response_text:
+            self._enable_followups()
             return
-
-        # Start typing
-        #
-        # 20ms = fairly fast
-        # 30ms = ChatGPT-like
-        # 40ms = slower
-        #
         self._typing_timer.start(25)
 
     def _type_next_chunk(self):
         if self._typed_position >= len(self._response_text):
             self._typing_timer.stop()
-
-            # Render the final response as Markdown once typing is complete.
             self.body.setMarkdown(self._response_text)
-
+            self._diagnosis = self._response_text
+            self._conversation = [{"role": "assistant", "content": self._response_text}]
+            self._enable_followups()
             return
 
-        # Type several characters per tick.
-        #
-        # This makes the animation smooth without creating
-        # thousands of UI updates for a long response.
-        chunk_size = 3
-
-        next_position = min(
-            self._typed_position + chunk_size,
-            len(self._response_text)
-        )
-
-        visible_text = self._response_text[:next_position]
-
-        self.body.setPlainText(visible_text)
-
+        next_position = min(self._typed_position + 3, len(self._response_text))
+        self.body.setPlainText(self._response_text[:next_position])
         self._typed_position = next_position
-
-        # Keep the view scrolled to the bottom while typing.
         scrollbar = self.body.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    # ─────────────────────────────────────────────────
-    # Error
-    # ─────────────────────────────────────────────────
+    def _enable_followups(self):
+        self._followup_enabled = True
+        self.question_input.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.question_input.setFocus()
+
+    def ask(self, question: str):
+        if not self._followup_enabled or self._loading_followup:
+            return
+        self.question_input.setText(question)
+        self._send_followup()
+
+    def _send_followup(self):
+        if not self._followup_enabled or self._loading_followup:
+            return
+        question = self.question_input.text().strip()
+        if not question:
+            return
+        self.question_input.clear()
+        self._loading_followup = True
+        self.question_input.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        self._conversation.append({"role": "user", "content": question})
+        self._render_conversation()
+        self._append_thinking()
+
+        provider = ai_assist.get_provider()
+        api_key = ai_assist.get_api_key(provider)
+        if not api_key:
+            self.append_followup_error(
+                "No AI API key is configured. Add one in Settings → 🤖 AI."
+            )
+            return
+
+        worker = ai_assist.AIConversationWorker(
+            provider,
+            api_key,
+            ai_assist.get_model(provider),
+            self._source_context,
+            self.conversation_payload()[:-1],
+            question,
+        )
+        worker.done.connect(
+            lambda answer, q=question: self.append_followup(q, answer)
+        )
+        worker.error.connect(self.append_followup_error)
+        worker.finished.connect(self._followup_finished)
+        self._followup_worker = worker
+        worker.start()
+
+    def _append_user(self, text: str):
+        safe = html_escape(text).replace("\n", "<br>")
+        self.body.append(
+            f'<br><div style="margin-top:8px;">'
+            f'<span style="color:{T["ACCENT"]}; font-weight:700;">You</span><br>'
+            f'<span style="color:{T["TEXT_PRIMARY"]};">{safe}</span></div>'
+        )
+
+    def _append_thinking(self):
+        self.body.append(
+            f'<br><span style="color:{T["TEXT_MUTED"]};">'
+            f'🤖 Thinking about that…</span>'
+        )
+        self.body.verticalScrollBar().setValue(self.body.verticalScrollBar().maximum())
+
+    def _render_conversation(self):
+        parts = []
+        for item in self._conversation:
+            role = item.get("role")
+            content = str(item.get("content", ""))
+            if role == "user":
+                parts.append(f"### 👤 You\n\n{content}")
+            else:
+                parts.append(f"### 🤖 AI\n\n{content}")
+        self.body.setMarkdown("\n\n---\n\n".join(parts))
+        self.body.verticalScrollBar().setValue(self.body.verticalScrollBar().maximum())
+
+    def append_followup(self, question: str, answer: str):
+        """Animate a completed follow-up answer into the conversation."""
+        self._followup_typing_timer.stop()
+        self._followup_response_text = answer or ""
+        self._followup_typed_position = 0
+
+        # Add an empty assistant message; it will be filled progressively.
+        self._conversation.append({"role": "assistant", "content": ""})
+        self._render_conversation()
+
+        if not self._followup_response_text:
+            self._finish_followup_typing()
+            return
+
+        self._followup_typing_timer.start(25)
+
+    def _type_followup_chunk(self):
+        if not self._conversation:
+            self._finish_followup_typing()
+            return
+
+        if self._followup_typed_position >= len(self._followup_response_text):
+            self._finish_followup_typing()
+            return
+
+        next_position = min(self._followup_typed_position + 3,
+                            len(self._followup_response_text))
+        self._followup_typed_position = next_position
+        self._conversation[-1]["content"] = self._followup_response_text[:next_position]
+
+        # Plain text during animation avoids expensive Markdown reflow on every tick.
+        self.body.setPlainText(self._conversation_to_plain_text())
+        scrollbar = self.body.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _conversation_to_plain_text(self):
+        parts = []
+        for item in self._conversation:
+            label = "👤 You" if item.get("role") == "user" else "🤖 AI"
+            parts.append(f"{label}\n\n{item.get('content', '')}")
+        return "\n\n────────────────────────\n\n".join(parts)
+
+    def _finish_followup_typing(self):
+        self._followup_typing_timer.stop()
+        self._render_conversation()
+        self._followup_response_text = ""
+        self._followup_typed_position = 0
+        self._loading_followup = False
+        self.question_input.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.question_input.setFocus()
+
+    def _followup_finished(self):
+        """Release the dialog-local worker reference after a follow-up ends."""
+        self._followup_worker = None
+
+    def append_followup_error(self, message: str):
+        # Keep the conversation intact and show the error as a transient final
+        # message; the next question can be asked normally.
+        self._render_conversation()
+        safe = html_escape(message or "Unknown AI error").replace("\n", "<br>")
+        self.body.append(
+            f'<br><span style="color:{T["DANGER"]};">⚠ {safe}</span>'
+        )
+        self._loading_followup = False
+        self.question_input.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.question_input.setFocus()
+
+    def conversation_payload(self):
+        return list(self._conversation)
+
+    def source_context(self):
+        return self._source_context
 
     def set_error(self, message: str):
         self.stop_loading()
         self._typing_timer.stop()
-
         self._response_text = ""
         self._typed_position = 0
-
         self.body.setPlainText(f"⚠ {message}")
+        self._followup_enabled = False
+        self.question_input.setEnabled(False)
+        self.send_btn.setEnabled(False)
+
+    def closeEvent(self, event):
+        self._loading_timer.stop()
+        self._typing_timer.stop()
+        self._followup_typing_timer.stop()
+        if self._followup_worker is not None:
+            try:
+                self._followup_worker.quit()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
 
 class LogViewerDialog(QDialog):
@@ -642,18 +811,12 @@ class LogViewerDialog(QDialog):
     keep pushing new lines into the view as they arrive over SSH, rather
     than requiring the user to click Refresh."""
 
-    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None,
-                 context: str = None):
+    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
         super().__init__(parent)
         self.ssh            = ssh
         self._pod           = pod
         self._ns            = namespace
         self._container     = container
-        # kubectl context to target (e.g. from the Kubernetes tab's context
-        # switcher). Without this, kubectl falls back to whatever context is
-        # current on the remote machine's kubeconfig, silently ignoring
-        # whichever cluster is selected in the UI.
-        self._ctx_flag      = f"--context {shlex.quote(context)} " if (context or "").strip() else ""
         self._workers       = []
         self._stream_worker = None   # the currently-running _ExecStreamWorker, if any
         self._ai_worker     = None   # the currently-running AIExplainWorker, if any
@@ -726,7 +889,7 @@ class LogViewerDialog(QDialog):
         prev = "--previous" if self.prev_chk.isChecked() else ""
         c    = f"-c {self._container}" if self._container else ""
         f    = "-f" if follow else ""
-        inner = f"kubectl logs {self._ctx_flag}--tail={n} -n {self._ns} {prev} {c} {f} {self._pod} 2>&1"
+        inner = f"kubectl logs --tail={n} -n {self._ns} {prev} {c} {f} {self._pod} 2>&1"
         # exec_command() opens a non-login shell, which skips /etc/profile —
         # exactly where kubectl's PATH entry usually lives (Homebrew, snap,
         # etc.). "bash -lc" forces a login shell so those get sourced.
@@ -811,6 +974,10 @@ class LogViewerDialog(QDialog):
             return
 
         self._ai_dialog = AIExplainDialog(self, f"AI diagnosis — {self._pod}")
+        self._ai_dialog.set_source_context(
+            f"Pod: {self._pod}\nNamespace: {self._ns}\n"
+            f"Container: {self._container or 'default'}\n\nLogs/evidence:\n{log_text}"
+        )
         self._ai_dialog.set_loading()
         self._ai_dialog.show()
 
@@ -890,8 +1057,7 @@ class ContainerPickerDialog(QDialog):
 
 
 class ExecDialog(QDialog):
-    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None,
-                 context: str = None):
+    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
         super().__init__(parent)
         self.ssh        = ssh
         self._pod       = pod
@@ -899,10 +1065,6 @@ class ExecDialog(QDialog):
         self._container = container
         self._cwd       = None
         self._workers   = []
-        # Same rationale as LogViewerDialog: without this, kubectl exec
-        # silently runs against the remote machine's current kubeconfig
-        # context instead of whichever cluster is selected in the UI.
-        self._ctx_flag  = f"--context {shlex.quote(context)} " if (context or "").strip() else ""
 
         # State for the "Analyze with AI" AI feature — the last command run
         # (not counting `cd`, which has its own distinct failure message
@@ -973,7 +1135,7 @@ class ExecDialog(QDialog):
                 prefix = f"cd '{self._cwd}' && " if self._cwd else ""
                 resolve_cmd = f"{prefix}cd '{target}' 2>/dev/null && pwd || echo __FAIL__"
             safe = resolve_cmd.replace("'", "'\\''")
-            full = f"kubectl exec {self._ctx_flag}-n {self._ns} {self._pod} {c} -- sh -c '{safe}' 2>&1"
+            full = f"kubectl exec -n {self._ns} {self._pod} {c} -- sh -c '{safe}' 2>&1"
             append_terminal_html(self.output, f"\n<span style='color:{T['ACCENT2']}'>$ {html_escape(cmd)}</span>")
             worker = CommandWorker(self.ssh, full)
             worker.done.connect(self._handle_cd_result)
@@ -984,7 +1146,7 @@ class ExecDialog(QDialog):
             return
 
         safe_cmd = (f"cd '{self._cwd}' && {cmd}" if self._cwd else cmd).replace("'", "'\\''")
-        full = f"kubectl exec {self._ctx_flag}-n {self._ns} {self._pod} {c} -- sh -c '{safe_cmd}' 2>&1"
+        full = f"kubectl exec -n {self._ns} {self._pod} {c} -- sh -c '{safe_cmd}' 2>&1"
         append_terminal_html(self.output, f"\n<span style='color:{T['ACCENT2']}'>$ {html_escape(cmd)}</span>")
         worker = CommandWorker(self.ssh, full)
         worker.result.connect(lambda out, err, code, cmd=cmd: self._on_cmd_result(cmd, out, err, code))
@@ -1023,6 +1185,12 @@ class ExecDialog(QDialog):
             return
 
         self._ai_dialog = AIExplainDialog(self, f"AI diagnosis — {self._last_cmd}")
+        self._ai_dialog.set_source_context(
+            f"Command: {self._last_cmd}\n"
+            f"Exit code: {self._last_exit_code}\n\n"
+            f"stderr:\n{self._last_stderr or '(none)'}\n\n"
+            f"stdout:\n{self._last_stdout or '(none)'}"
+        )
         self._ai_dialog.set_loading()
         self._ai_dialog.show()
 

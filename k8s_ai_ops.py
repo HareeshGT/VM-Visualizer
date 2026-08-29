@@ -177,6 +177,52 @@ def _save_history(history: list):
         pass
 
 
+AUDIT_MAX_ENTRIES = 500
+
+def _load_audit_log() -> list:
+    try:
+        rows = load_settings().get("k8s_audit_log", [])
+        return [r for r in rows if isinstance(r, dict)][-AUDIT_MAX_ENTRIES:]
+    except Exception:
+        return []
+
+def _save_audit_log(rows: list):
+    try:
+        save_settings(k8s_audit_log=rows[-AUDIT_MAX_ENTRIES:])
+    except Exception:
+        pass
+
+def _append_audit(action: dict, command: str, status: str, output: str = "",
+                  confirmed: bool = False, risk: str = "low"):
+    rows = _load_audit_log()
+    rows.append({
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "context": action.get("context", ""),
+        "namespace": action.get("namespace", "default"),
+        "action": action.get("action"),
+        "resource": action.get("resource"),
+        "name": action.get("name"),
+        "command": command,
+        "status": status,
+        "confirmed": bool(confirmed),
+        "risk": risk,
+        "output": (output or "")[-1000:],
+    })
+    _save_audit_log(rows)
+
+def _risk_level(action: dict, context: str, protected: bool) -> str:
+    op = action.get("action")
+    ctx = (context or "").lower()
+    prod = any(x in ctx for x in ("prod", "production"))
+    if op == "delete" and (protected or prod):
+        return "critical"
+    if op == "delete" or (op == "restart" and (protected or prod)):
+        return "high"
+    if op in {"scale", "restart"}:
+        return "medium"
+    return "low"
+
+
 def _history_text(history: list, limit: int = HISTORY_CONTEXT_ITEMS) -> str:
     rows = history[-limit:]
     if not rows:
@@ -1217,6 +1263,11 @@ class K8sAIOpsWidget(QWidget):
         self.clear_history_btn.setFixedHeight(34)
         self.clear_history_btn.clicked.connect(self._clear_history)
         btn_row.addWidget(self.clear_history_btn)
+
+        self.audit_btn = QPushButton("Audit Log")
+        self.audit_btn.setFixedHeight(34)
+        self.audit_btn.clicked.connect(self._show_audit_log)
+        btn_row.addWidget(self.audit_btn)
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -1705,6 +1756,14 @@ class K8sAIOpsWidget(QWidget):
             return
 
         context = self._context()
+        kube_context = self._kube_context()
+        if not kube_context:
+            self._write_error("No Kubernetes context is selected. Refresh contexts and try again.")
+            return
+        history_for_context = [
+            row for row in self._history
+            if not row.get("context") or row.get("context") == kube_context
+        ]
 
         self.output.append(
             f'<br><span style="color:{T["ACCENT2"]}">$ '
@@ -1724,7 +1783,7 @@ class K8sAIOpsWidget(QWidget):
             request,
             namespace,
             context,
-            list(self._history),
+            history_for_context,
         )
         worker.done.connect(self._on_ai_done)
         worker.error.connect(self._on_ai_error)
@@ -1808,8 +1867,13 @@ class K8sAIOpsWidget(QWidget):
             self._set_busy(False)
 
     def _execute_action(self, action: dict):
+        kube_context = self._kube_context()
+        if not kube_context:
+            self._write_error("No Kubernetes context is selected; operation blocked for safety.")
+            self._set_busy(False)
+            return
+        action["context"] = kube_context
         description = operation_description(action)
-        action["context"] = self._kube_context()
         is_relative_scale = (
             action["action"] == "scale" and action.get("mode") == "relative"
         )
@@ -1848,8 +1912,11 @@ class K8sAIOpsWidget(QWidget):
         # protected pattern (Settings → Kubernetes Tabs) — scaling dev/test
         # is a routine, frequent action and shouldn't need a click-through
         # every time, but scaling prod/mcp should.
-        needs_confirmation = action["action"] == "delete" or action["action"] == "restart"
+        risk = _risk_level(action, kube_context, protected)
+        needs_confirmation = action["action"] in {"delete", "restart"}
         if action["action"] == "scale" and protected:
+            needs_confirmation = True
+        if risk in {"high", "critical"}:
             needs_confirmation = True
 
         if needs_confirmation:
@@ -1861,6 +1928,8 @@ class K8sAIOpsWidget(QWidget):
                 title = "Confirm Kubernetes Scale — Protected Namespace"
 
             extra_note = ""
+            if any(x in kube_context.lower() for x in ("prod", "production")):
+                extra_note += "\n\n⚠ Selected context looks like a production cluster."
             if protected and action["action"] != "delete":
                 extra_note = (
                     f'\n\n⚠ "{namespace}" matches a protected namespace '
@@ -1999,6 +2068,7 @@ class K8sAIOpsWidget(QWidget):
         worker = CommandWorker(self.ssh, command + " 2>&1")
         worker._k8s_action = action
         worker._k8s_command = command
+        worker._k8s_confirmed = True
         self._operation_worker = worker
         worker.result.connect(
             lambda output, err, exit_code, a=action, c=command:
@@ -2048,6 +2118,9 @@ class K8sAIOpsWidget(QWidget):
             command = getattr(self._operation_worker, "_k8s_command", "")
             if action:
                 self._remember_operation(action, command, "failed", str(error))
+                _append_audit(action, command, "failed", str(error),
+                              getattr(self._operation_worker, "_k8s_confirmed", False),
+                              _risk_level(action, action.get("context", ""), is_protected_namespace(action.get("namespace", ""))))
 
     def _on_operation_finished(self):
         self._operation_worker = None
@@ -2061,6 +2134,7 @@ class K8sAIOpsWidget(QWidget):
             "resource": action.get("resource"),
             "name": action.get("name"),
             "namespace": action.get("namespace", "default"),
+            "context": action.get("context", ""),
             "command": command,
         }
 
@@ -2076,10 +2150,47 @@ class K8sAIOpsWidget(QWidget):
         if output:
             row["output"] = output[-1000:]
 
+        _append_audit(
+            action, command, status, output,
+            confirmed=(status == "success"),
+            risk=_risk_level(action, action.get("context", ""), is_protected_namespace(action.get("namespace", ""))),
+        )
         self._history.append(row)
         self._history = self._history[-MAX_HISTORY:]
         _save_history(self._history)
         self._update_history_label()
+
+    def _show_audit_log(self):
+        rows = _load_audit_log()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Kubernetes Audit Log")
+        dlg.resize(900, 560)
+        lay = QVBoxLayout(dlg)
+        browser = QTextBrowser()
+        browser.setFont(monospace_font(10))
+        if not rows:
+            browser.setPlainText("No Kubernetes operations have been audited yet.")
+        else:
+            lines = []
+            for row in reversed(rows):
+                lines.append(
+                    f"[{row.get('timestamp','')}] {str(row.get('status','')).upper()} "
+                    f"risk={row.get('risk','low')}\n"
+                    f"context:   {row.get('context','—')}\n"
+                    f"namespace: {row.get('namespace','default')}\n"
+                    f"operation: {row.get('action','')} {row.get('resource','')}/{row.get('name','')}\n"
+                    f"command:   {row.get('command','')}\n"
+                    f"confirmed: {row.get('confirmed', False)}\n"
+                    f"output:    {row.get('output','').strip()}\n"
+                    + "-" * 88 + "\n"
+                )
+            browser.setPlainText("".join(lines))
+        lay.addWidget(browser)
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(dlg.reject)
+        close.accepted.connect(dlg.accept)
+        lay.addWidget(close)
+        dlg.exec_()
 
     def closeEvent(self, event):
         if self._voice_worker is not None:

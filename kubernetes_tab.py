@@ -43,6 +43,10 @@ from utils import (
 
 class KubernetesTab(QWidget):
     status_msg = pyqtSignal(str)
+    # Emitted whenever the selected kubeconfig context changes. Other tabs
+    # (Dashboard, future observability views, etc.) can follow the same
+    # cluster without touching the jump host's global current-context.
+    context_changed = pyqtSignal(str)
 
     # Cap on simultaneous tunnel-restart CommandWorkers. Each worker's
     # run() opens TWO channels on the shared SSH transport (one exec_command
@@ -103,7 +107,7 @@ class KubernetesTab(QWidget):
     # ── Kubernetes context helpers ───────────────────────────
     def _context_flag(self) -> str:
         context = (self._current_context or "").strip()
-        return f"--context {shlex.quote(context)}" if context else ""
+        return f"--context={shlex.quote(context)}" if context else ""
 
     def _apply_context_to_command(self, cmd: str) -> str:
         """Apply the selected context to a kubectl command."""
@@ -140,12 +144,13 @@ class KubernetesTab(QWidget):
         if not context or context == self._current_context:
             return
         self._current_context = context
+        self.context_changed.emit(context)
         self._current_ns = "default"
         self.ns_combo.blockSignals(True)
         self.ns_combo.clear()
         self.ns_combo.addItem("Loading…")
         self.ns_combo.blockSignals(False)
-        self.health_lbl.setText("● Switching cluster…")
+        self.health_lbl.setText(f"● Switching: {context}")
         self.health_lbl.setStyleSheet(f"color: {T['WARNING']}; font-size: 12px;")
         self._load_namespaces()
 
@@ -2485,6 +2490,9 @@ class KubernetesTab(QWidget):
             return
 
         if self._pod_ai_dialog is not None:
+            self._pod_ai_dialog.set_source_context(
+                f"Pod: {pod}\nNamespace: {ns}\n\nLogs/evidence:\n{log_text}"
+            )
             self._pod_ai_dialog.set_loading()
 
         provider = ai_assist.get_provider()
