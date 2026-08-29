@@ -99,6 +99,51 @@ MAX_PROMPT_CHARS = 4000
 MAX_HISTORY = 40
 HISTORY_CONTEXT_ITEMS = 12
 
+# Namespaces matching any of these patterns (case-insensitive substring
+# match) are treated as sensitive: AI-driven "scale" operations targeting
+# them require an explicit confirmation, the same way "delete" always
+# does. Configurable from Settings → Kubernetes Tabs, persisted under the
+# "k8s_protected_namespaces" settings key so it survives restarts.
+DEFAULT_PROTECTED_NAMESPACE_PATTERNS = ["prod", "production", "mcp"]
+
+
+# ---------------------------------------------------------------------------
+# Protected-namespace configuration
+# ---------------------------------------------------------------------------
+
+def get_protected_namespaces() -> list:
+    """Returns the configured list of protected-namespace substrings
+    (lower-cased, empties dropped), falling back to the built-in default
+    the first time this is called (i.e. nothing saved yet)."""
+    try:
+        stored = load_settings().get("k8s_protected_namespaces")
+        if stored is None:
+            return list(DEFAULT_PROTECTED_NAMESPACE_PATTERNS)
+        if not isinstance(stored, list):
+            return list(DEFAULT_PROTECTED_NAMESPACE_PATTERNS)
+        cleaned = [str(p).strip().lower() for p in stored if str(p).strip()]
+        return cleaned
+    except Exception:
+        return list(DEFAULT_PROTECTED_NAMESPACE_PATTERNS)
+
+
+def save_protected_namespaces(patterns: list):
+    cleaned = sorted({str(p).strip().lower() for p in (patterns or []) if str(p).strip()})
+    try:
+        save_settings(k8s_protected_namespaces=cleaned)
+    except Exception:
+        pass
+
+
+def is_protected_namespace(namespace: str) -> bool:
+    """True if `namespace` matches any configured protected-namespace
+    pattern (case-insensitive substring, e.g. pattern "mcp" matches
+    namespace "mcp-prod-eks")."""
+    ns = (namespace or "").strip().lower()
+    if not ns:
+        return False
+    return any(pattern in ns for pattern in get_protected_namespaces())
+
 
 # ---------------------------------------------------------------------------
 # Persistent operation history
@@ -1076,9 +1121,9 @@ class K8sAIOpsWidget(QWidget):
         root.addWidget(description)
 
         examples = QLabel(
-            "Examples: scale deployment cowformservice to 5 replicas   •   "
-            "scale up cowformservice by 2   •   scale down cowformservice by 1   •   "
-            "scale it back   •   restart deployment cowformservice   •   "
+            "Examples: scale deployment deployment-name to 5 replicas   •   "
+            "scale up deployment-name by 2   •   scale down deployment-name by 1   •   "
+            "scale it back   •   restart deployment deployment-name   •   "
             "repeat that"
         )
         examples.setWordWrap(True)
@@ -1770,13 +1815,44 @@ class K8sAIOpsWidget(QWidget):
                 f'Command: {self._escape_html(command)}</span>'
             )
 
-        if action["action"] == "delete":
+        namespace = action.get("namespace", "")
+        protected = is_protected_namespace(namespace)
+
+        # Confirmation gate. "delete" always confirms. "restart" always
+        # confirms (rollout restarts every pod in the workload, which is
+        # disruptive even though it isn't destructive). "scale" only
+        # confirms when the target namespace matches a configured
+        # protected pattern (Settings → Kubernetes Tabs) — scaling dev/test
+        # is a routine, frequent action and shouldn't need a click-through
+        # every time, but scaling prod/mcp should.
+        needs_confirmation = action["action"] == "delete" or action["action"] == "restart"
+        if action["action"] == "scale" and protected:
+            needs_confirmation = True
+
+        if needs_confirmation:
+            if action["action"] == "delete":
+                title = "Confirm Kubernetes Delete"
+            elif action["action"] == "restart":
+                title = "Confirm Kubernetes Restart"
+            else:
+                title = "Confirm Kubernetes Scale — Protected Namespace"
+
+            extra_note = ""
+            if protected and action["action"] != "delete":
+                extra_note = (
+                    f'\n\n⚠ "{namespace}" matches a protected namespace '
+                    "pattern configured in Settings."
+                )
+            elif action["action"] == "restart":
+                extra_note = "\n\nThis restarts every pod in the workload."
+
             answer = QMessageBox.question(
                 self,
-                "Confirm Kubernetes Delete",
+                title,
                 (
                     f"{description}\n\n"
-                    "This operation will modify the cluster.\n"
+                    "This operation will modify the cluster."
+                    f"{extra_note}\n\n"
                     "Do you want to continue?"
                 ),
                 QMessageBox.Yes | QMessageBox.No,

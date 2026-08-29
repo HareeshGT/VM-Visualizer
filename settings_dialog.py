@@ -11,6 +11,7 @@ from PyQt5.QtGui import QFont
 from themes import T, apply_qss_to, load_settings, save_settings
 import security
 import ai_assist
+import k8s_ai_ops
 from lock_screen import SetPinDialog
 
 _AUTOLOCK_OPTIONS = [
@@ -155,6 +156,33 @@ class SettingsDialog(QDialog):
         iv.addStretch()
         scroll.setWidget(inner)
         v.addWidget(scroll, 1)
+
+        v.addSpacing(4)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet(f"color: {T['BORDER']};")
+        v.addWidget(line)
+        v.addSpacing(4)
+
+        protected_lbl = QLabel("Protected namespaces (AI Ops)")
+        protected_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-weight: 600;")
+        v.addWidget(protected_lbl)
+
+        protected_desc = QLabel(
+            "Comma-separated name fragments. When the AI Kubernetes Operations "
+            "panel targets a namespace matching one of these (e.g. \"mcp\" "
+            "matches \"mcp-prod-eks\"), scale requests require confirmation "
+            "just like delete already does. Restart always confirms."
+        )
+        protected_desc.setWordWrap(True)
+        protected_desc.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        v.addWidget(protected_desc)
+
+        self.protected_ns_edit = QLineEdit()
+        self.protected_ns_edit.setText(", ".join(k8s_ai_ops.get_protected_namespaces()))
+        self.protected_ns_edit.setPlaceholderText("prod, production, mcp")
+        v.addWidget(self.protected_ns_edit)
+
         return w
 
     # ── AI tab ────────────────────────────────────────────────
@@ -270,6 +298,10 @@ class SettingsDialog(QDialog):
 
         # Kubernetes tab visibility
         save_settings(k8s_hidden_tabs=self.hidden_k8s_tabs())
+
+        # Protected namespaces (AI Ops confirmation gate)
+        patterns = [p.strip() for p in self.protected_ns_edit.text().split(",")]
+        k8s_ai_ops.save_protected_namespaces(patterns)
 
         # AI
         self._ai_keys[self._current_provider_id] = self.api_key_edit.text()
