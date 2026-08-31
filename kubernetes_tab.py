@@ -65,6 +65,8 @@ class KubernetesTab(QWidget):
         self.ssh          = None
         self._current_ns  = "default"
         self._current_context = ""
+        self._cluster_available = False
+        self._cluster_probe_in_progress = False
         self._contexts = []
         self._contexts_pending_select = None
         self._namespaces  = []
@@ -122,12 +124,26 @@ class KubernetesTab(QWidget):
         return cmd[:prefix_len] + "kubectl " + self._context_flag() + stripped[len("kubectl"): ]
 
     def _load_contexts(self):
-        self._run_cmd("kubectl config get-contexts -o name", self._populate_contexts, apply_context=False)
+        """Load kubeconfig contexts, but do not start resource queries yet.
+
+        A machine may have kubectl/kubeconfig installed while the configured
+        cluster is unavailable.  In that case we only do the context lookup
+        and one cluster-health probe; resource tabs remain completely idle.
+        """
+        self._cluster_available = False
+        self._cluster_probe_in_progress = False
+        self._auto_refresh_timer.stop()
+        self._run_cmd(
+            "kubectl config get-contexts -o name",
+            self._populate_contexts,
+            apply_context=False,
+        )
 
     def _populate_contexts(self, out: str):
         contexts = [x.strip() for x in (out or "").splitlines() if x.strip()]
         self._contexts = contexts
         current = self._current_context
+
         self.context_combo.blockSignals(True)
         self.context_combo.clear()
         self.context_combo.addItems(contexts)
@@ -136,13 +152,27 @@ class KubernetesTab(QWidget):
             self.context_combo.setCurrentText(chosen)
             self._current_context = chosen
         self.context_combo.blockSignals(False)
-        if self._current_context:
-            self._load_namespaces()
+
+        if not self._current_context:
+            self._cluster_available = False
+            self._current_ns = ""
+            self.ns_combo.clear()
+            self.health_lbl.setText("● No Kubernetes Cluster Found")
+            self.health_lbl.setStyleSheet(f"color: {T['WARNING']}; font-size: 12px;")
+            return
+
+        self.health_lbl.setText(f"● Checking: {self._current_context}")
+        self.health_lbl.setStyleSheet(f"color: {T['WARNING']}; font-size: 12px;")
+        self._check_cluster_health()
 
     def _on_context_change(self, context: str):
         context = (context or "").strip()
         if not context or context == self._current_context:
             return
+
+        self._cluster_available = False
+        self._cluster_probe_in_progress = False
+        self._auto_refresh_timer.stop()
         self._current_context = context
         self.context_changed.emit(context)
         self._current_ns = "default"
@@ -150,9 +180,9 @@ class KubernetesTab(QWidget):
         self.ns_combo.clear()
         self.ns_combo.addItem("Loading…")
         self.ns_combo.blockSignals(False)
-        self.health_lbl.setText(f"● Switching: {context}")
+        self.health_lbl.setText(f"● Checking: {context}")
         self.health_lbl.setStyleSheet(f"color: {T['WARNING']}; font-size: 12px;")
-        self._load_namespaces()
+        self._check_cluster_health()
 
     # ── Local connection info (for tunnelling) ────────────────
     def set_connection_info(self, host, port, user, pem):
@@ -2072,7 +2102,7 @@ class KubernetesTab(QWidget):
                 f"font-weight: 700; border-top: 1px solid {T['BORDER']}; "
                 f"border-bottom: 1px solid {T['BORDER']}; padding-left: 14px;"
             )
-        if self.ssh:
+        if self.ssh and self._current_context:
             self._check_cluster_health()
             # Pod/deployment cards (k8s_cards.py) bake T's colors in at
             # construction time rather than re-reading them live, so a
@@ -2168,8 +2198,8 @@ class KubernetesTab(QWidget):
             self.ns_combo.setCurrentText("default")
         self.ns_combo.blockSignals(False)
         self._current_ns = self.ns_combo.currentText()
-        self._refresh_current_tab()
-        self._check_cluster_health()
+        if self._cluster_available:
+            self._refresh_current_tab()
 
     def _on_ns_change(self, ns: str):
         self._current_ns = ns
@@ -2205,15 +2235,52 @@ class KubernetesTab(QWidget):
 
     # ── Cluster health ────────────────────────────────────────
     def _check_cluster_health(self):
-        self._run_cmd("kubectl cluster-info 2>&1 | head -2", self._update_health)
+        """Probe the selected context before allowing any resource command."""
+        if not self.ssh or not self._current_context:
+            self._cluster_available = False
+            return
+        if self._cluster_probe_in_progress:
+            return
+
+        self._cluster_probe_in_progress = True
+        self._run_cmd(
+            "kubectl cluster-info --request-timeout=3s 2>&1 | head -3",
+            self._update_health,
+        )
 
     def _update_health(self, out: str):
-        if "running" in out.lower() or "control plane" in out.lower():
+        self._cluster_probe_in_progress = False
+        text = (out or "").lower()
+        healthy = (
+            "running" in text
+            or "control plane" in text
+            or "kubernetes control plane" in text
+        ) and not any(
+            bad in text
+            for bad in (
+                "unable to connect",
+                "connection refused",
+                "connection timed out",
+                "i/o timeout",
+                "no such host",
+                "context deadline exceeded",
+                "the server doesn't have a resource type",
+            )
+        )
+
+        self._cluster_available = healthy
+
+        if healthy:
             self.health_lbl.setText("● Cluster OK")
             self.health_lbl.setStyleSheet(f"color: {T['SUCCESS']}; font-size: 12px;")
+            self._load_namespaces()
         else:
-            self.health_lbl.setText("● Cluster?")
-            self.health_lbl.setStyleSheet(f"color: {T['WARNING']}; font-size: 12px;")
+            self._auto_refresh_timer.stop()
+            self.auto_btn.setChecked(False)
+            self.auto_btn.setText("⏱  Auto (30 s)")
+            self.health_lbl.setText("● Cluster unavailable")
+            self.health_lbl.setStyleSheet(f"color: {T['DANGER']}; font-size: 12px;")
+            self._clear_all(keep_context=True)
 
     def _toggle_auto_refresh(self, on: bool):
         if on:
@@ -2224,9 +2291,14 @@ class KubernetesTab(QWidget):
             self.auto_btn.setText("⏱  Auto (30 s)")
 
     def _auto_refresh(self):
+        if not self.ssh or not self._cluster_available or not self._current_context:
+            self._auto_refresh_timer.stop()
+            self.auto_btn.setChecked(False)
+            self.auto_btn.setText("⏱  Auto (30 s)")
+            return
         self._refresh_current_tab()
 
-    def _clear_all(self):
+    def _clear_all(self, keep_context=False):
         self.pod_list.clear()
         self.deploy_list.clear()
         self.pod_count_lbl.setText("")
@@ -2264,14 +2336,22 @@ class KubernetesTab(QWidget):
         self._events_raw = ""
         if getattr(self, "event_warn_btn", None) is not None:
             self.event_warn_btn.setChecked(False)
-        self.context_combo.clear()
-        self._contexts = []
-        self._current_context = ""
         self.ns_combo.clear()
+        if not keep_context:
+            self.context_combo.clear()
+            self._contexts = []
+            self._current_context = ""
         self.health_lbl.setText("● Cluster")
         self.health_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
 
     def _refresh_current_tab(self, _=None):
+        # Never issue resource-level kubectl commands until the selected
+        # context has passed the cluster-health probe.  This also prevents
+        # tab changes and auto-refresh from generating unwanted commands on
+        # machines that have no reachable Kubernetes cluster.
+        if not self.ssh or not self._cluster_available or not self._current_context:
+            return
+
         idx = self.sub_tabs.currentIndex()
         if   idx == 0: self._load_pods()
         elif idx == 1: self._load_deployments()
