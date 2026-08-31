@@ -69,11 +69,12 @@ THEMES = {
     },
 
     "Snow Light": {
+    # High-contrast light palette: muted/semantic colors are dark enough for normal UI text on white/light cards.
         "BG_DARK": "#f5f5f7", "BG_PANEL": "#ffffff", "BG_SIDEBAR": "#eceef2",
         "BG_ITEM": "#f0f1f4", "BG_ITEM_SEL": "#dbe4fe", "BG_HOVER": "#e6e9ee",
         "ACCENT": "#2563eb", "ACCENT2": "#3b82f6", "TEXT_PRIMARY": "#1c1c1e",
-        "TEXT_DIM": "#4b5563", "TEXT_MUTED": "#9ca3af", "BORDER": "#d1d5db",
-        "SUCCESS": "#16a34a", "DANGER": "#dc2626", "WARNING": "#d97706", "INFO": "#2563eb",
+        "TEXT_DIM": "#4b5563", "TEXT_MUTED": "#52525b", "BORDER": "#d1d5db",
+        "SUCCESS": "#15803d", "DANGER": "#b91c1c", "WARNING": "#b45309", "INFO": "#1d4ed8",
     },
 }
 

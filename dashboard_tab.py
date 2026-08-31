@@ -37,7 +37,7 @@ from PyQt5.QtWidgets import (
     QFrame, QScrollArea, QTreeWidget, QTreeWidgetItem, QGraphicsDropShadowEffect, QSizePolicy,
 )
 from PyQt5.QtCore import (
-    Qt, QTimer, pyqtSignal, QVariantAnimation, QEasingCurve,
+    Qt, QTimer, pyqtSignal, QVariantAnimation, QEasingCurve, QEvent,
 )
 from PyQt5.QtGui import QColor, QPainter, QPen
 
@@ -48,6 +48,33 @@ from progress_ring import CircularProgress
 
 
 REFRESH_MS = 6000  # live-dashboard cadence while the tab is visible
+
+
+def _is_light_background():
+    """Return True when the active theme background is light.
+
+    This deliberately derives readability from the current background rather
+    than trusting a stale per-widget text colour.  Theme switching changes the
+    global palette/QSS, and this keeps Dashboard text black on light themes and
+    white on dark themes even if a widget was created under the previous theme.
+    """
+    c = QColor(T.get("BG_DARK", "#000000"))
+    return c.lightness() >= 160
+
+
+def _dashboard_text(kind="primary"):
+    """Return high-contrast Dashboard text for the active light/dark theme."""
+    if _is_light_background():
+        return {
+            "primary": "#111111",
+            "dim": "#303030",
+            "muted": "#4a4a4a",
+        }.get(kind, "#111111")
+    return {
+        "primary": "#ffffff",
+        "dim": "#d9d9d9",
+        "muted": "#aaaaaa",
+    }.get(kind, "#ffffff")
 
 # ── Combined single-round-trip shell commands ──────────────────
 # Both commands detect the remote OS (uname -s) and branch, since a
@@ -188,7 +215,7 @@ class HistoryChart(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(T["BG_ITEM"]))
-        p.setPen(QColor(T["TEXT_MUTED"]))
+        p.setPen(QColor(_dashboard_text("muted")))
         p.drawText(10, 20, self.title)
         if not self.points:
             p.drawText(10, 45, "Collecting data…")
@@ -205,7 +232,7 @@ class HistoryChart(QWidget):
         for i in range(5):
             y = top + int(h * i / 4)
             p.drawLine(left, y, left + w, y)
-        p.setPen(QColor(T["TEXT_MUTED"]))
+        p.setPen(QColor(_dashboard_text("muted")))
         p.drawText(3, top + 4, f"{hi:.0f}")
         p.drawText(3, top + h, f"{lo:.0f}")
         pen = QPen(QColor(T["ACCENT"]), 2)
@@ -218,7 +245,7 @@ class HistoryChart(QWidget):
             if prev:
                 p.drawLine(prev[0], prev[1], x, y)
             prev = (x, y)
-        p.setPen(QColor(T["TEXT_MUTED"]))
+        p.setPen(QColor(_dashboard_text("muted")))
         p.drawText(left, self.height() - 6, self.points[0][0])
         p.drawText(max(left, self.width() - 55), self.height() - 6, self.points[-1][0])
 
@@ -309,7 +336,7 @@ def _status_color(status: str) -> str:
         return T["WARNING"]
     if any(x in s for x in ("error", "crash", "fail", "evict", "unknown")):
         return T["DANGER"]
-    return T["TEXT_DIM"]
+    return _dashboard_text("dim")
 
 
 # STATUS column values `kubectl get nodes` actually prints (comma-joined
@@ -415,9 +442,9 @@ class NodeDetailWindow(QWidget):
     def _apply_styles(self):
         self.setStyleSheet(f"background: {T['BG_DARK']};")
         self.title_lbl.setStyleSheet(
-            f"color: {T['TEXT_PRIMARY']}; font-size: 15px; font-weight: 700;"
+            f"color: {_dashboard_text("primary")}; font-size: 15px; font-weight: 700;"
         )
-        self.summary_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.summary_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         self.pod_tree.setStyleSheet(
             f"QTreeWidget {{ font-size: 12px; }} QTreeWidget::item {{ height: 30px; }}"
         )
@@ -452,7 +479,7 @@ class NodeDetailWindow(QWidget):
                         T["SUCCESS"] if got == want and int(want) > 0 else T["WARNING"]
                     ))
             for col in (3, 4):
-                item.setForeground(col, QColor(T["TEXT_PRIMARY"] if usage else T["TEXT_MUTED"]))
+                item.setForeground(col, QColor(_dashboard_text("primary") if usage else _dashboard_text("muted")))
             tooltip = self._pod_tooltip(pod)
             for col in range(10):
                 item.setToolTip(col, tooltip)
@@ -666,8 +693,8 @@ class NodeCard(QFrame):
             # Dashed border + muted panel background (rather than the
             # solid border/BG_ITEM real node cards use) at rest — so the
             # "not a real node" signal doesn't depend on hover state.
-            self._border_rest  = T['TEXT_MUTED']
-            self._border_hover = T['TEXT_DIM']
+            self._border_rest  = _dashboard_text("muted")
+            self._border_hover = _dashboard_text("dim")
             self._border_style = "dashed"
             self.setStyleSheet(
                 f"QFrame#node_card {{ background: {T['BG_PANEL']}; "
@@ -682,19 +709,19 @@ class NodeCard(QFrame):
                 f"border: 1px solid {self._border_rest}; border-radius: 14px; }}"
             )
         self.name_lbl.setStyleSheet(
-            f"color: {T['TEXT_DIM'] if self._is_bucket else T['TEXT_PRIMARY']}; "
+            f"color: {_dashboard_text("dim") if self._is_bucket else _dashboard_text("primary")}; "
             f"font-size: 15px; font-weight: 700;"
         )
-        self.roles_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
-        self.meta_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 10px;")
-        self.pods_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        self.roles_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
+        self.meta_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 10px;")
+        self.pods_lbl.setStyleSheet(f"color: {_dashboard_text("dim")}; font-size: 12px;")
         for cap in self._ring_caps:
-            cap.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 11px; font-weight: 600;")
+            cap.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 11px; font-weight: 600;")
         if self._is_bucket:
-            self._blurb_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+            self._blurb_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         if self._detail_strip is not None:
             self._detail_strip.setStyleSheet(
-                f"background: {T['BG_HOVER']}; color: {T['TEXT_DIM']}; "
+                f"background: {T['BG_HOVER']}; color: {_dashboard_text("dim")}; "
                 f"font-size: 11px; border-radius: 8px; padding: 6px 8px;"
             )
 
@@ -925,6 +952,14 @@ class DashboardTab(QWidget):
         else:
             self._timer.stop()
 
+    def changeEvent(self, event):
+        # Theme changes update the QApplication palette. Re-apply all of the
+        # Dashboard's inline styles so labels created under the previous theme
+        # cannot retain e.g. Rose Gold text after switching to Snow Light.
+        if event.type() == QEvent.ApplicationPaletteChange:
+            self.apply_theme()
+        super().changeEvent(event)
+
     def apply_theme(self):
         self._apply_styles()
         self.cpu_ring["ring"].refresh_theme()
@@ -948,12 +983,12 @@ class DashboardTab(QWidget):
         cb.setSpacing(10)
 
         title = QLabel("🖥  Dashboard")
-        title.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 14px; font-weight: 700;")
+        title.setStyleSheet(f"color: {_dashboard_text("primary")}; font-size: 14px; font-weight: 700;")
         cb.addWidget(title)
         cb.addStretch()
 
         self.updated_lbl = QLabel("")
-        self.updated_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.updated_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         cb.addWidget(self.updated_lbl)
 
         self.live_lbl = QLabel("⚫  Not connected")
@@ -976,7 +1011,7 @@ class DashboardTab(QWidget):
 
         self.disconnected_lbl = QLabel("Connect to an instance to see its dashboard.")
         self.disconnected_lbl.setAlignment(Qt.AlignCenter)
-        self.disconnected_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; padding: 40px; font-size: 13px;")
+        self.disconnected_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; padding: 40px; font-size: 13px;")
         self._content_layout.addWidget(self.disconnected_lbl)
 
         # ── Instance card ──────────────────────────────────
@@ -1015,9 +1050,9 @@ class DashboardTab(QWidget):
             ("load", "Load average"), ("cpu_model", "CPU"),
         ]):
             lk = QLabel(label + ":")
-            lk.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+            lk.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
             lv = QLabel("—")
-            lv.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 12px;")
+            lv.setStyleSheet(f"color: {_dashboard_text("primary")}; font-size: 12px;")
             lv.setWordWrap(True)
             grid.addWidget(lk, row, 0)
             grid.addWidget(lv, row, 1)
@@ -1028,7 +1063,7 @@ class DashboardTab(QWidget):
         vm_body.addLayout(top_row)
 
         disk_lbl = QLabel("Disk")
-        disk_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px; font-weight: 700;")
+        disk_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px; font-weight: 700;")
         vm_body.addWidget(disk_lbl)
 
         self.disk_tree = QTreeWidget()
@@ -1060,10 +1095,10 @@ class DashboardTab(QWidget):
             tile_layout.setSpacing(2)
             value = QLabel("—")
             value.setAlignment(Qt.AlignCenter)
-            value.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 17px; font-weight: 700;")
+            value.setStyleSheet(f"color: {_dashboard_text("primary")}; font-size: 17px; font-weight: 700;")
             caption = QLabel(label)
             caption.setAlignment(Qt.AlignCenter)
-            caption.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 10px; font-weight: 600;")
+            caption.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 10px; font-weight: 600;")
             tile_layout.addWidget(value)
             tile_layout.addWidget(caption)
             summary_grid.addWidget(tile, i // 4, i % 4)
@@ -1116,12 +1151,12 @@ class DashboardTab(QWidget):
         # clicked), so this table stays one clean row per node.
         self.k8s_card = self._make_card("⎈  Kubernetes Nodes")
         self.k8s_note = QLabel("")
-        self.k8s_note.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.k8s_note.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         self.k8s_note.hide()
         self.k8s_card["body"].addWidget(self.k8s_note)
 
         self.k8s_hint = QLabel("Double-click a node card to see the pods running on it.")
-        self.k8s_hint.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.k8s_hint.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         self.k8s_card["body"].addWidget(self.k8s_hint)
 
         # Node summaries as cards, 3 per row, instead of a one-row-per-node
@@ -1149,7 +1184,7 @@ class DashboardTab(QWidget):
         self.history_card = self._make_card("📈  Historical Monitoring")
         hb = self.history_card["body"]
         self.history_status = QLabel("Collecting history…")
-        self.history_status.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.history_status.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         hb.addWidget(self.history_status)
 
         grid = QGridLayout()
@@ -1165,7 +1200,7 @@ class DashboardTab(QWidget):
 
         self.history_alerts = QLabel("Alerts: none")
         self.history_alerts.setWordWrap(True)
-        self.history_alerts.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+        self.history_alerts.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         hb.addWidget(self.history_alerts)
 
         self.history_events = QTreeWidget()
@@ -1198,7 +1233,7 @@ class DashboardTab(QWidget):
         outer.setContentsMargins(16, 12, 16, 16)
         outer.setSpacing(10)
         lbl = QLabel(title)
-        lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-size: 13px; font-weight: 700;")
+        lbl.setStyleSheet(f"color: {_dashboard_text("primary")}; font-size: 13px; font-weight: 700;")
         outer.addWidget(lbl)
         body = QVBoxLayout()
         outer.addLayout(body)
@@ -1213,7 +1248,7 @@ class DashboardTab(QWidget):
 
         lk = QLabel(label)
         lk.setAlignment(Qt.AlignHCenter)
-        lk.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px; font-weight: 700;")
+        lk.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px; font-weight: 700;")
         col.addWidget(lk)
 
         ring = CircularProgress(size=140, thickness=12, show_text=True, font_size=24)
@@ -1225,7 +1260,7 @@ class DashboardTab(QWidget):
 
         val_lbl = QLabel("—")
         val_lbl.setAlignment(Qt.AlignHCenter)
-        val_lbl.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        val_lbl.setStyleSheet(f"color: {_dashboard_text("dim")}; font-size: 12px;")
         col.addWidget(val_lbl)
 
         return {"layout": col, "ring": ring, "val_lbl": val_lbl}
@@ -1351,7 +1386,7 @@ class DashboardTab(QWidget):
     def _update_live_label(self):
         if not self.ssh:
             self.live_lbl.setText("⚫  Not connected")
-            self.live_lbl.setStyleSheet(f"color: {T['TEXT_MUTED']}; font-size: 12px;")
+            self.live_lbl.setStyleSheet(f"color: {_dashboard_text("muted")}; font-size: 12px;")
         elif self._active:
             self.live_lbl.setText("🟢  Live")
             self.live_lbl.setStyleSheet(f"color: {T['SUCCESS']}; font-size: 12px;")
@@ -2042,7 +2077,7 @@ class DashboardTab(QWidget):
                 alerts.append(f"Pending pods {latest['pending']}")
             self.history_alerts.setText("Alerts: " + (", ".join(alerts) if alerts else "none"))
             self.history_alerts.setStyleSheet(
-                f"color: {T['DANGER'] if alerts else T['TEXT_MUTED']}; font-size: 12px;"
+                f"color: {T['DANGER'] if alerts else _dashboard_text("muted")}; font-size: 12px;"
             )
 
     def _on_k8s_error(self, err: str):
