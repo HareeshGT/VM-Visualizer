@@ -401,7 +401,7 @@ CMD=(
     # AI provider support
     --hidden-import=ai_assist
 
-    # Kubernetes AI Ops
+    # Kubernetes OpsMind
     --hidden-import=k8s_ai_ops
 
     # Voice input
@@ -596,7 +596,7 @@ echo "EC2 Manager installed successfully!"
 echo "=========================================="
 echo
 echo "Included:"
-echo "  ✓ Kubernetes AI Ops"
+echo "  ✓ Kubernetes OpsMind"
 echo "  ✓ Google Web Speech voice input"
 echo "  ✓ PyAudio microphone support"
 echo "  ✓ Native FLAC support"

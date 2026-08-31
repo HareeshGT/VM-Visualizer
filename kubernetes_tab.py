@@ -842,11 +842,11 @@ class KubernetesTab(QWidget):
 
         self.sub_tabs.addTab(
             w,
-            "✨  AI Ops",
+            "✨  OpsMind",
         )
 
     def _ai_ops_context(self):
-        """Give AI Ops a small amount of useful UI context.
+        """Give OpsMind a small amount of useful UI context.
 
         The AI still has to identify the resource explicitly unless the user
         gives enough information. This context is only there to improve

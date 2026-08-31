@@ -228,7 +228,7 @@ def _risk_level(action: dict, context: str, protected: bool) -> str:
 def _history_text(history: list, limit: int = HISTORY_CONTEXT_ITEMS) -> str:
     rows = history[-limit:]
     if not rows:
-        return "No previous AI Ops operations are recorded."
+        return "No previous OpsMind operations are recorded."
 
     lines = []
     for idx, row in enumerate(rows, 1):
@@ -337,7 +337,7 @@ Clarification example:
 {{"action":"clarification_required","reason":"Please specify the target replica count."}}
 
 Unsupported example:
-{{"action":"unsupported","reason":"This Kubernetes operation is not supported by AI Ops."}}
+{{"action":"unsupported","reason":"This Kubernetes operation is not supported by OpsMind."}}
 
 Current selected namespace:
 {namespace}
@@ -345,7 +345,7 @@ Current selected namespace:
 Current UI context:
 {context}
 
-Previous AI Ops history:
+Previous OpsMind history:
 {_history_text(history)}
 
 User request:
@@ -460,7 +460,7 @@ def _general_question_response(request: str, namespace: str = None):
 
     if any(phrase in clean for phrase in identity_patterns):
         return (
-            "I'm the Kubernetes AI Ops assistant in EC2 Manager. "
+            "I'm the Kubernetes OpsMind assistant in EC2 Manager. "
             "I can interpret Kubernetes requests and run approved "
             "operations."
         )
@@ -781,7 +781,7 @@ class K8sGoogleSpeechWorker(QThread):
     """Record microphone audio until stopped, then transcribe it with
     SpeechRecognition's classic Google Web Speech recognizer.
 
-    No LLM is used here. Only the resulting text is emitted to the AI Ops
+    No LLM is used here. Only the resulting text is emitted to the OpsMind
     widget, which then uses the existing AI provider for Kubernetes intent.
     """
 
@@ -1135,7 +1135,7 @@ class K8sAIOpsWidget(QWidget):
         self.ssh = ssh
 
     def _build_ui(self):
-        # Keep the real AI Ops UI inside a separate content widget so the
+        # Keep the real OpsMind UI inside a separate content widget so the
         # content can be blurred while a sharp access-lock overlay remains
         # readable above it.
         outer = QVBoxLayout(self)
@@ -1171,7 +1171,7 @@ class K8sAIOpsWidget(QWidget):
         root.addLayout(title_row)
 
         description = QLabel(
-            "Describe a Kubernetes operation in plain English. Previous AI Ops "
+            "Describe a Kubernetes operation in plain English. Previous OpsMind "
             "operations are remembered across app restarts."
         )
         description.setWordWrap(True)
@@ -1284,7 +1284,7 @@ class K8sAIOpsWidget(QWidget):
 
         self._update_history_label()
         self._write_info(
-            "AI Ops is ready.\n\n"
+            "OpsMind is ready.\n\n"
             "Previous operations are remembered and used as context for follow-up requests.\n"
             "Try: scale deployment my-app to 3 replicas\n"
             "     scale up my-app by 2\n"
@@ -1330,7 +1330,7 @@ class K8sAIOpsWidget(QWidget):
         icon.setStyleSheet("font-size: 34px; background: transparent; border: none;")
         card_layout.addWidget(icon)
 
-        title = QLabel("AI Ops is locked")
+        title = QLabel("OpsMind is locked")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet(
             f"color: {T['TEXT_PRIMARY']}; font-size: 18px; "
@@ -1358,7 +1358,7 @@ class K8sAIOpsWidget(QWidget):
         return ai_assist.PROVIDERS.get(provider, {}).get("label", provider)
 
     def refresh_ai_access(self):
-        """Enable AI Ops only when the selected provider has an API key."""
+        """Enable OpsMind only when the selected provider has an API key."""
         provider = ai_assist.get_provider()
         api_key = ai_assist.get_api_key(provider)
         allowed = bool((api_key or "").strip())
@@ -1389,7 +1389,7 @@ class K8sAIOpsWidget(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         # Settings may have been changed while another dialog/tab was active.
-        # Re-check whenever AI Ops becomes visible so it unlocks without a restart.
+        # Re-check whenever OpsMind becomes visible so it unlocks without a restart.
         self.refresh_ai_access()
 
     def _namespace(self) -> str:
@@ -1518,7 +1518,7 @@ class K8sAIOpsWidget(QWidget):
 
         self.voice_btn.setText("⏹  Stop Voice")
         self.voice_btn.setToolTip(
-            "Stop recording and send the transcription to AI Ops"
+            "Stop recording and send the transcription to OpsMind"
         )
 
         self.request_input.clear()
@@ -1666,7 +1666,7 @@ class K8sAIOpsWidget(QWidget):
         if self._busy:
             return
         self.output.clear()
-        self._write_info("AI Ops is ready.")
+        self._write_info("OpsMind is ready.")
 
     def _clear_history(self):
         if self._busy:
@@ -1679,7 +1679,7 @@ class K8sAIOpsWidget(QWidget):
 
         answer = QMessageBox.question(
             self,
-            "Clear AI Ops History",
+            "Clear OpsMind History",
             "Delete the saved AI Kubernetes operation history?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -1690,7 +1690,7 @@ class K8sAIOpsWidget(QWidget):
         self._history = []
         _save_history(self._history)
         self._update_history_label()
-        self._write_info("\n✓ AI Ops history cleared.")
+        self._write_info("\n✓ OpsMind history cleared.")
 
     def _submit(self):
         if not self._ai_access_allowed:
