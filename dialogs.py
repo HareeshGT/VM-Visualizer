@@ -1058,12 +1058,13 @@ class ContainerPickerDialog(QDialog):
 
 
 class ExecDialog(QDialog):
-    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
+    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None, context: str = None):
         super().__init__(parent)
         self.ssh        = ssh
         self._pod       = pod
         self._ns        = namespace
         self._container = container
+        self.context    = context
         self._cwd       = None
         self._workers   = []
 
