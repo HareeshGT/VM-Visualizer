@@ -811,12 +811,13 @@ class LogViewerDialog(QDialog):
     keep pushing new lines into the view as they arrive over SSH, rather
     than requiring the user to click Refresh."""
 
-    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None):
+    def __init__(self, parent, ssh, namespace: str, pod: str, container: str = None, context=None):
         super().__init__(parent)
         self.ssh            = ssh
         self._pod           = pod
         self._ns            = namespace
         self._container     = container
+        self._context       = context
         self._workers       = []
         self._stream_worker = None   # the currently-running _ExecStreamWorker, if any
         self._ai_worker     = None   # the currently-running AIExplainWorker, if any
