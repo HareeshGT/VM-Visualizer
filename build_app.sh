@@ -39,15 +39,15 @@ if [ -d "$DIR/.git" ]; then
     git pull
 
     echo
-    echo "Git status..."
-    git status
+    echo "Git Logs..."
+    git log -5 --oneline
 else
     git clone "$REPO" "$DIR"
     cd "$DIR"
 
     echo
-    echo "Git status..."
-    git status
+    echo "Git Logs..."
+    git log -5 --oneline
 fi
 
 # --------------------------------------------------
