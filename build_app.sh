@@ -369,12 +369,12 @@ echo
 echo "Cleaning previous PyInstaller build..."
 
 rm -rf build
-rm -rf "dist/EC2 Manager.app"
-rm -rf "dist/EC2 Manager"
+rm -rf "dist/Deckhand.app"
+rm -rf "dist/Deckhand"
 
 # Remove stale spec so the generated build always reflects
 # the current project state.
-rm -f "EC2 Manager.spec"
+rm -f "Deckhand.spec"
 
 # --------------------------------------------------
 # Build
@@ -390,7 +390,7 @@ CMD=(
     --windowed
     --onedir
     --name
-    "EC2 Manager"
+    "Deckhand"
     --osx-bundle-identifier
     "com.hareeshgt.ec2manager"
 
@@ -428,7 +428,7 @@ fi
 
 if [[ "$OS" == "Darwin" ]]; then
 
-    APP_PATH="dist/EC2 Manager.app"
+    APP_PATH="dist/Deckhand.app"
     APP_PLIST="$APP_PATH/Contents/Info.plist"
 
     # Finder-launched apps need an explicit microphone usage description.
@@ -447,7 +447,7 @@ if [[ "$OS" == "Darwin" ]]; then
 
     /usr/libexec/PlistBuddy         -c "Delete :NSMicrophoneUsageDescription"         "$APP_PLIST" 2>/dev/null || true
 
-    /usr/libexec/PlistBuddy         -c "Add :NSMicrophoneUsageDescription string 'EC2 Manager uses the microphone for Kubernetes voice commands.'"         "$APP_PLIST"
+    /usr/libexec/PlistBuddy         -c "Add :NSMicrophoneUsageDescription string 'Deckhand uses the microphone for Kubernetes voice commands.'"         "$APP_PLIST"
 
     # Give the application a stable bundle identifier.
     /usr/libexec/PlistBuddy         -c "Delete :CFBundleIdentifier"         "$APP_PLIST" 2>/dev/null || true
@@ -510,7 +510,7 @@ Darwin)
     echo
     echo "Installing on macOS..."
 
-    APP_PATH="dist/EC2 Manager.app"
+    APP_PATH="dist/Deckhand.app"
 
     if [ ! -d "$APP_PATH" ]; then
         echo
@@ -519,12 +519,12 @@ Darwin)
         exit 1
     fi
 
-    sudo rm -rf "/Applications/EC2 Manager.app"
+    sudo rm -rf "/Applications/Deckhand.app"
     sudo cp -R "$APP_PATH" "/Applications/"
 
     echo
     echo "Installed:"
-    echo "/Applications/EC2 Manager.app"
+    echo "/Applications/Deckhand.app"
     ;;
 
 Linux)
@@ -532,20 +532,20 @@ Linux)
     echo
     echo "Installing on Linux..."
 
-    if [ ! -d "dist/EC2 Manager" ]; then
+    if [ ! -d "dist/Deckhand" ]; then
         echo
         echo "ERROR: PyInstaller did not create:"
-        echo "dist/EC2 Manager"
+        echo "dist/Deckhand"
         exit 1
     fi
 
-    sudo rm -rf "/opt/EC2 Manager"
-    sudo mkdir -p "/opt/EC2 Manager"
-    sudo cp -R "dist/EC2 Manager/." "/opt/EC2 Manager/"
+    sudo rm -rf "/opt/Deckhand"
+    sudo mkdir -p "/opt/Deckhand"
+    sudo cp -R "dist/Deckhand/." "/opt/Deckhand/"
 
     echo
     echo "Installed:"
-    echo "/opt/EC2 Manager"
+    echo "/opt/Deckhand"
     ;;
 
 MINGW*|MSYS*|CYGWIN*)
@@ -553,19 +553,19 @@ MINGW*|MSYS*|CYGWIN*)
     echo
     echo "Installing on Windows..."
 
-    INSTALL_DIR="/c/Program Files/EC2 Manager"
+    INSTALL_DIR="/c/Program Files/Deckhand"
 
-    if [ ! -d "dist/EC2 Manager" ]; then
+    if [ ! -d "dist/Deckhand" ]; then
         echo
         echo "ERROR: PyInstaller did not create:"
-        echo "dist/EC2 Manager"
+        echo "dist/Deckhand"
         exit 1
     fi
 
     rm -rf "$INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
 
-    cp -R "dist/EC2 Manager/." "$INSTALL_DIR/"
+    cp -R "dist/Deckhand/." "$INSTALL_DIR/"
 
     echo
     echo "Installed to:"
@@ -592,7 +592,7 @@ rm -rf "$DIR"
 
 echo
 echo "=========================================="
-echo "EC2 Manager installed successfully!"
+echo "Deckhand installed successfully!"
 echo "=========================================="
 echo
 echo "Included:"

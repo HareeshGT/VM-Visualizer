@@ -1,4 +1,4 @@
-"""main.py — Application entry point for EC2 Manager.
+"""main.py — Application entry point for Deckhand.
 
 Imports:
     themes      — theme palette definitions, QSS builder, apply helpers
@@ -47,7 +47,7 @@ def _build_palette() -> QPalette:
 def main() -> int:
     # ── Qt application ────────────────────────────────────────
     app = QApplication(sys.argv)
-    app.setApplicationName("EC2 Manager")
+    app.setApplicationName("Deckhand")
     app.setOrganizationName("EC2Manager")
 
     # On macOS, Qt's native 'macos' style renders combo-box and menu popups

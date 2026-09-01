@@ -1,4 +1,4 @@
-# VM Visualizer / EC2 Manager — runtime dependencies
+# VM Visualizer / Deckhand — runtime dependencies
 #
 # PyQt5 (with the Multimedia submodules pulled in by MediaPlayerDialog's
 # use of QtMultimedia/QtMultimediaWidgets in dialogs.py) and paramiko

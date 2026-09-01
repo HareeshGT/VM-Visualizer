@@ -1,6 +1,6 @@
-# EC2 Manager
+# Deckhand
 
-**EC2 Manager** (also referred to as **VM Visualizer**) is a cross-platform desktop GUI application built with PyQt5 for managing AWS EC2 instances and Kubernetes clusters.
+**Deckhand** (also referred to as **VM Visualizer**) is a cross-platform desktop GUI application built with PyQt5 for managing AWS EC2 instances and Kubernetes clusters.
 
 It combines SSH/SFTP-based remote file management, a built-in code editor, an integrated terminal, live VM/Kubernetes monitoring, Kubernetes resource management, AI-assisted Kubernetes operations, and voice-controlled Kubernetes commands in a single dark-themed, Finder-style interface.
 
@@ -328,7 +328,7 @@ If permission has not been granted, enable the application under:
 
 **System Settings → Privacy & Security → Microphone**
 
-The target application may appear as **EC2 Manager**.
+The target application may appear as **Deckhand**.
 
 ### Voice Recognition Notes
 
@@ -464,7 +464,7 @@ The installer:
 10. Installs the resulting application into:
 
 ```text
-/Applications/EC2 Manager.app
+/Applications/Deckhand.app
 ```
 
 The macOS installer uses the Homebrew Python interpreter rather than Apple's system Python.
@@ -483,7 +483,7 @@ Supported package managers include:
 The application is installed to:
 
 ```text
-/opt/EC2 Manager
+/opt/Deckhand
 ```
 
 ## Windows
@@ -493,7 +493,7 @@ The installer supports Git Bash/MSYS/Cygwin environments and requests administra
 The packaged application is installed under:
 
 ```text
-C:\Program Files\EC2 Manager
+C:\Program Files\Deckhand
 ```
 
 ---
@@ -521,7 +521,7 @@ python3 -m PyInstaller \
     --windowed \
     --onedir \
     --icon=VM_Visualizer.icns \
-    --name="EC2 Manager" \
+    --name="Deckhand" \
     --hidden-import=paramiko \
     --collect-all=paramiko \
     --hidden-import=ai_assist \
@@ -534,7 +534,7 @@ python3 -m PyInstaller \
 The output will be:
 
 ```text
-dist/EC2 Manager.app
+dist/Deckhand.app
 ```
 
 ## Command Breakdown
@@ -544,7 +544,7 @@ dist/EC2 Manager.app
 | `--windowed` | Builds the application as a GUI app without a terminal/console window. |
 | `--onedir` | Creates a directory-style application bundle containing the executable and its dependencies. |
 | `--icon=VM_Visualizer.icns` | Uses the supplied macOS application icon. |
-| `--name="EC2 Manager"` | Sets the bundle and executable name. |
+| `--name="Deckhand"` | Sets the bundle and executable name. |
 | `--hidden-import=paramiko` | Explicitly includes Paramiko. |
 | `--collect-all=paramiko` | Collects Paramiko submodules, data, and binaries that may not be detected automatically. |
 | `--hidden-import=ai_assist` | Ensures the AI provider module is included. |
@@ -563,7 +563,7 @@ NSMicrophoneUsageDescription
 
 The provided build script adds this metadata to the generated app so macOS can request microphone permission.
 
-After packaging, grant microphone access to **EC2 Manager** under:
+After packaging, grant microphone access to **Deckhand** under:
 
 **System Settings → Privacy & Security → Microphone**
 
@@ -582,7 +582,7 @@ PyInstaller packages the Python runtime and the Python dependencies used by the 
 Therefore, a user running:
 
 ```text
-/Applications/EC2 Manager.app
+/Applications/Deckhand.app
 ```
 
 does not need to separately install:

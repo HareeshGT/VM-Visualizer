@@ -105,7 +105,7 @@ class SplashScreen(QWidget):
     HOLD_MS  = 500
     ZOOM_MS  = 420
 
-    def __init__(self, app_name="EC2 MANAGER", parent=None):
+    def __init__(self, app_name="Deckhand", parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
