@@ -68,6 +68,58 @@ class _TerminalPopoutWindow(QDialog):
         event.accept()
 
 
+class _UserPickerDialog(QDialog):
+    """Lets the user pick from system accounts discovered via SSH, instead
+    of typing a username blind. Falls back to manual entry for accounts
+    that don't show up in /etc/passwd (LDAP/NIS, etc.)."""
+
+    def __init__(self, parent, users, current=None):
+        super().__init__(parent)
+        self.setWindowTitle("Switch User")
+        self.resize(320, 420)
+        self.selected_user = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select a user to switch to:"))
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(lambda _: self.accept())
+        for name, uid in users:
+            label = "{}  (root)".format(name) if uid == "0" else name
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, name)
+            self.list_widget.addItem(item)
+            if name == current:
+                self.list_widget.setCurrentItem(item)
+        layout.addWidget(self.list_widget)
+
+        manual_row = QHBoxLayout()
+        manual_row.addWidget(QLabel("Or enter manually:"))
+        self.manual_edit = QLineEdit()
+        self.manual_edit.setPlaceholderText("username")
+        manual_row.addWidget(self.manual_edit)
+        layout.addLayout(manual_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        # Manual entry wins if filled in, so a typed name always overrides
+        # an incidentally-still-selected list item.
+        manual = self.manual_edit.text().strip()
+        if manual:
+            self.selected_user = manual
+        else:
+            item = self.list_widget.currentItem()
+            if item:
+                self.selected_user = item.data(Qt.UserRole)
+        if not self.selected_user:
+            return  # nothing chosen — keep the dialog open
+        super().accept()
+
+
 class EC2FileManager(QMainWindow):
 
     SORT_KEY_FUNCS = {
@@ -155,6 +207,7 @@ class EC2FileManager(QMainWindow):
             b = QPushButton(text)
             b.setToolTip(tooltip)
             b.setStyleSheet("padding: 4px 10px;")
+            b.setFixedHeight(28)
             if checkable:
                 b.setCheckable(True)
             if width:
@@ -262,6 +315,10 @@ class EC2FileManager(QMainWindow):
         self.act_disconnect.clicked.connect(lambda: self._disconnect())
         tb.addWidget(self.act_connect)
         tb.addWidget(self.act_disconnect)
+
+        self.switch_user_btn = _tbtn("🔐 Switch User", "sudo -u <user> — switch context for terminal and file ops")
+        self.switch_user_btn.clicked.connect(self._on_switch_user_btn)
+        tb.addWidget(self.switch_user_btn)
 
         # Main tabs
         self.main_tabs = QTabWidget()
@@ -1677,6 +1734,15 @@ class EC2FileManager(QMainWindow):
             self.sudo_badge.show()
         else:
             self.sudo_badge.hide()
+        self._update_switch_user_btn()
+
+    def _update_switch_user_btn(self):
+        if self._sudo_user:
+            self.switch_user_btn.setText("🔓  Exit Sudo ({})".format(self._sudo_user))
+            self.switch_user_btn.setToolTip("Return to the original login user")
+        else:
+            self.switch_user_btn.setText("🔐  Switch User")
+            self.switch_user_btn.setToolTip("sudo -u <user> — switch context for terminal and file ops")
 
     # ── Context menu ──────────────────────────────────────────
     def _ctx_menu(self, pos):
@@ -1729,9 +1795,50 @@ class EC2FileManager(QMainWindow):
         dlg.exec_()
 
     def _prompt_switch_user(self):
+        if not self.ssh:
+            QMessageBox.information(self, "Switch User", "Connect to a server first.")
+            return
+        self.progress.show()
+        self.status.showMessage("Looking up system users…")
+        # Only accounts with a real login shell — excludes daemon/service
+        # accounts (nologin/false) that nobody would ever sudo into.
+        # UID tags along so the picker can flag root distinctly.
+        cmd = "awk -F: '($7 !~ /(nologin|false)$/) {print $1\":\"$3}' /etc/passwd | sort -t: -k2 -n"
+        worker = CommandWorker(self.ssh, cmd)
+        worker.done.connect(self._on_users_listed)
+        worker.error.connect(lambda _err: self._prompt_switch_user_manual())
+        track_worker(self._workers, worker)
+        worker.start()
+
+    def _on_users_listed(self, output):
+        self.progress.hide()
+        self.status.clearMessage()
+        users = []
+        for line in (output or "").splitlines():
+            name, sep, uid = line.strip().partition(":")
+            if name and sep:
+                users.append((name, uid))
+        if not users:
+            self._prompt_switch_user_manual()
+            return
+        dlg = _UserPickerDialog(self, users, current=self._sudo_user)
+        if dlg.exec_() == QDialog.Accepted and dlg.selected_user:
+            self._switch_to_user(dlg.selected_user)
+
+    def _prompt_switch_user_manual(self):
+        self.progress.hide()
+        self.status.showMessage("Could not list system users — enter manually")
         username, ok = QInputDialog.getText(self, "Switch User", "Username:")
         if ok and username.strip():
             self._switch_to_user(username.strip())
+
+    def _on_switch_user_btn(self):
+        # Same toggle behavior as the context-menu entries: prompt for a
+        # username when not currently sudo'd, exit sudo mode when we are.
+        if self._sudo_user:
+            self._exit_sudo_mode()
+        else:
+            self._prompt_switch_user()
 
     # ── Cleanup ───────────────────────────────────────────────
     def closeEvent(self, event):
