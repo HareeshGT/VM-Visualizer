@@ -2506,7 +2506,53 @@ class KubernetesTab(QWidget):
     def _pod_logs(self):
         pod, ns = self._selected_pod()
         if pod:
-            LogViewerDialog(self, self.ssh, ns, pod, context=self._current_context).exec_()
+            self._logs_pod(pod, ns)
+
+
+    def _logs_pod(self, pod: str, ns: str):
+        """Look up the pod containers before opening LogViewerDialog.
+
+        Single-container pods open directly. Multi-container pods require an
+        explicit container selection so logs are never taken from the wrong
+        sidecar/container by accident.
+        """
+        self._run_cmd(
+            f"kubectl get pod -n {ns} {pod} "
+            f"-o jsonpath='{{.spec.containers[*].name}}' 2>&1",
+            lambda out, pod=pod, ns=ns:
+                self._on_logs_containers_fetched(out, pod, ns),
+        )
+
+
+    def _on_logs_containers_fetched(self, out: str, pod: str, ns: str):
+        # Same trailing-quote defensiveness as the Exec container lookup.
+        containers = out.strip().strip("'").split()
+
+        if len(containers) <= 1:
+            LogViewerDialog(
+                self,
+                self.ssh,
+                ns,
+                pod,
+                containers[0] if containers else None
+            ).exec_()
+            return
+
+        dlg = ContainerPickerDialog(
+            self,
+            pod,
+            containers,
+            action="Logs"
+        )
+
+        if dlg.exec_() == QDialog.Accepted:
+            LogViewerDialog(
+                self,
+                self.ssh,
+                ns,
+                pod,
+                dlg.selected_container()
+            ).exec_()
 
     # ── Inline "✨ AI" button on troubled pod cards ─────────────
     # Same diagnosis flow as LogViewerDialog's "Analyze with AI" button
@@ -2660,7 +2706,7 @@ class KubernetesTab(QWidget):
         pod  = meta.get("name")
         ns   = meta.get("namespace") or "default"
         menu = QMenu(self)
-        menu.addAction("📋  View Logs",  lambda: LogViewerDialog(self, self.ssh, ns, pod, context=self._current_context).exec_())
+        menu.addAction("📋  View Logs",  lambda: self._logs_pod(pod, ns))
         menu.addAction("💻  Exec Shell", lambda: self._exec_pod(pod, ns))
         menu.addAction("📄  Describe",   lambda: self._describe("pod", pod, ns))
         menu.addSeparator()

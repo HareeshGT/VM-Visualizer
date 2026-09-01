@@ -1019,15 +1019,20 @@ class LogViewerDialog(QDialog):
 
 # ─── K8s exec dialog ─────────────────────────────────────────
 class ContainerPickerDialog(QDialog):
-    """Shown before opening ExecDialog when the target pod has more than
-    one container. kubectl exec silently targets the pod's first
-    container when -c isn't given — harmless for a single-container pod,
-    but easy to exec into the wrong place once a pod has a sidecar
-    (istio-proxy, log shippers, init containers, etc.), so ask instead of
-    guessing whenever there's an actual choice."""
+    """Container selector used before Exec or Logs when a pod has
+    multiple containers."""
 
-    def __init__(self, parent, pod: str, containers: list):
+    def __init__(
+        self,
+        parent,
+        pod: str,
+        containers: list,
+        action: str = "Exec"
+    ):
         super().__init__(parent)
+
+        self._action = action
+
         self.setWindowTitle(f"Select Container — {pod}")
         apply_qss_to(self)
         self.setMinimumWidth(340)
@@ -1036,19 +1041,28 @@ class ContainerPickerDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        info = QLabel(f'"{pod}" has {len(containers)} containers — pick one to exec into:')
+        info = QLabel(
+            f'"{pod}" has {len(containers)} containers — '
+            f'pick one to {self._action.lower()}:'
+        )
         info.setWordWrap(True)
-        info.setStyleSheet(f"color: {T['TEXT_DIM']}; font-size: 12px;")
+        info.setStyleSheet(
+            f"color: {T['TEXT_DIM']}; font-size: 12px;"
+        )
         layout.addWidget(info)
 
         self.combo = QComboBox()
         self.combo.addItems(containers)
         layout.addWidget(self.combo)
 
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+
         ok_btn = bb.button(QDialogButtonBox.Ok)
         ok_btn.setObjectName("primary")
-        ok_btn.setText("Exec")
+        ok_btn.setText(self._action)
+
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
