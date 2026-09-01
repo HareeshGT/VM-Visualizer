@@ -72,7 +72,51 @@ class ConnectWorker(QThread):
                 kw["look_for_keys"] = False
                 kw["allow_agent"]   = False
             elif self.pem:
-                kw["key_filename"] = self.pem
+                # NOTE: deliberately NOT using kw["key_filename"] = self.pem
+                # here. When given a key_filename, paramiko's SSHClient
+                # blindly loops over RSAKey -> ECDSAKey -> Ed25519Key,
+                # trying to parse the SAME file as each type in turn
+                # (client.py:_auth). If the real key (say, RSA) parses fine
+                # but the server then rejects the auth attempt for an
+                # unrelated reason (wrong key, key not authorized, etc.),
+                # paramiko swallows that real AuthenticationException and
+                # keeps looping — ECDSAKey and Ed25519Key then predictably
+                # fail to parse an RSA-formatted file, and it's the LAST of
+                # those parse failures that gets raised at the end. That's
+                # exactly the misleading "encountered RSA key, expected
+                # OPENSSH key" (or similar) error: it names a completely
+                # unrelated key class and hides the actual problem.
+                #
+                # Loading the key explicitly up front and passing it as
+                # pkey= instead makes paramiko try only that one real key,
+                # so if auth fails the genuine SSHException/
+                # AuthenticationException surfaces instead of being masked.
+                try:
+                    pkey = paramiko.PKey.from_path(self.pem)
+                except AttributeError:
+                    # paramiko < 3.2 doesn't have PKey.from_path(). Fall
+                    # back to the old behavior; less reliable error
+                    # messages, but keeps this working on older installs.
+                    kw["key_filename"] = self.pem
+                except paramiko.ssh_exception.PasswordRequiredException:
+                    self.error.emit(
+                        "The key file '{}' is passphrase-protected. "
+                        "EC2 Manager doesn't currently support "
+                        "passphrase-protected keys — use an unencrypted "
+                        "copy of the key.".format(self.pem)
+                    )
+                    return
+                except Exception as key_err:
+                    self.error.emit(
+                        "Could not read key file '{}': {}".format(
+                            self.pem, key_err
+                        )
+                    )
+                    return
+                else:
+                    kw["pkey"]           = pkey
+                    kw["look_for_keys"]  = False
+                    kw["allow_agent"]    = False
             elif self.host in ["127.0.0.1", "localhost"]:
                 # "Connect to Localhost" quick-button with no password/pem
                 # entered — leave look_for_keys/allow_agent at their
