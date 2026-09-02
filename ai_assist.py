@@ -240,6 +240,89 @@ def _deepseek_truncated(data):
     return bool(choices) and choices[0].get("finish_reason") == "length"
 
 
+def _groq_request(prompt, api_key, model):
+    # Groq's API is OpenAI-compatible (same /chat/completions shape, same
+    # "Authorization: Bearer" header) running on Groq's own LPU hardware —
+    # just a different host/model catalog. Groq has a permanently-free
+    # tier (no credit card) with generous daily request limits, and
+    # accepts the plain "max_tokens" field across its whole catalog, so
+    # this mirrors _deepseek_request rather than _openai_request (no
+    # reasoning_effort / max_completion_tokens juggling needed).
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    body = json.dumps({
+        "model": model,
+        "max_tokens": MAX_TOKENS,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    return url, headers, body
+
+
+def _groq_parse(data):
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _groq_error(detail, code):
+    return detail.get("error", {}).get("message") if isinstance(detail, dict) else None
+
+
+def _groq_truncated(data):
+    choices = data.get("choices") or []
+    return bool(choices) and choices[0].get("finish_reason") == "length"
+
+
+def _openrouter_request(prompt, api_key, model):
+    # OpenRouter is also OpenAI-compatible and fronts 70+ providers behind
+    # one key/host — including a rotating set of models suffixed ":free"
+    # that cost nothing to call. HTTP-Referer/X-Title headers are optional
+    # (only used by OpenRouter for their own leaderboard attribution), so
+    # they're left out here to keep this dependency-free and match the
+    # other providers' minimal header set.
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    body = json.dumps({
+        "model": model,
+        "max_tokens": MAX_TOKENS,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    return url, headers, body
+
+
+def _openrouter_parse(data):
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _openrouter_error(detail, code):
+    # OpenRouter wraps the same {"error": {"message": ...}} shape as
+    # OpenAI, but on a routing failure (e.g. an unrecognized/retired
+    # ":free" model id) sometimes returns the message as a bare string
+    # instead of a dict — handle both.
+    if isinstance(detail, dict):
+        err = detail.get("error")
+        if isinstance(err, dict):
+            return err.get("message")
+        if isinstance(err, str):
+            return err
+    return None
+
+
+def _openrouter_truncated(data):
+    choices = data.get("choices") or []
+    return bool(choices) and choices[0].get("finish_reason") == "length"
+
+
 PROVIDERS = {
     "anthropic": {
         "label": "Anthropic (Claude)",
@@ -252,8 +335,8 @@ PROVIDERS = {
         "model_samples": [
             "claude-haiku-4-5-20251001",
             "claude-sonnet-5",
-            "claude-opus-4-8",
-            "claude-fable-5",
+            "claude-opus-5",
+            "claude-fable-5-1",
         ],
         "default_model": "claude-sonnet-5",
     },
@@ -264,9 +347,14 @@ PROVIDERS = {
         "parse_response": _gemini_parse,
         "parse_error": _gemini_error,
         "was_truncated": _gemini_truncated,
+        # Cheap/high-volume → frontier reasoning.
         "model_samples": [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
             "gemini-3.6-flash",
             "gemini-3.7-flash",
+            "gemini-3.1-pro",
+            "gemini-2.5-pro",
         ],
         "default_model": "gemini-3.6-flash",
     },
@@ -277,10 +365,15 @@ PROVIDERS = {
         "parse_response": _openai_parse,
         "parse_error": _openai_error,
         "was_truncated": _openai_truncated,
+        # Cheap → flagship, plus the "-pro" reasoning-mode variants of
+        # Terra/Sol (same model, reasoning.mode=pro under the hood, for
+        # tasks worth the extra latency/cost).
         "model_samples": [
             "gpt-5.6-luna",
             "gpt-5.6-terra",
+            "gpt-5.6-terra-pro",
             "gpt-5.6-sol",
+            "gpt-5.6-sol-pro",
         ],
         "default_model": "gpt-5.6-terra",
     },
@@ -293,12 +386,56 @@ PROVIDERS = {
         "was_truncated": _deepseek_truncated,
         # Fast/cheap → larger flagship. (The old deepseek-chat /
         # deepseek-reasoner aliases were retired in July 2026 in favor of
-        # explicit V4 model names.)
+        # explicit V4 model names.) DeepSeek's own API only exposes these
+        # two — more variants (Flash-Vision-Exp, dated snapshots, etc.)
+        # exist on router platforms like OpenRouter, not on DeepSeek's
+        # direct API.
         "model_samples": [
             "deepseek-v4-flash",
             "deepseek-v4-pro",
         ],
         "default_model": "deepseek-v4-flash",
+    },
+    "groq": {
+        "label": "Groq (free tier)",
+        "key_placeholder": "gsk_…",
+        "build_request": _groq_request,
+        "parse_response": _groq_parse,
+        "parse_error": _groq_error,
+        "was_truncated": _groq_truncated,
+        # Groq has a permanent no-credit-card free tier (get a key at
+        # console.groq.com/keys). Small/fast → larger, roughly ordered by
+        # daily rate limit (generous → tighter).
+        "model_samples": [
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "deepseek-r1-distill-llama-70b",
+            "gemma2-9b-it",
+        ],
+        "default_model": "llama-3.3-70b-versatile",
+    },
+    "openrouter": {
+        "label": "OpenRouter (free models)",
+        "key_placeholder": "sk-or-v1-…",
+        "build_request": _openrouter_request,
+        "parse_response": _openrouter_parse,
+        "parse_error": _openrouter_error,
+        "was_truncated": _openrouter_truncated,
+        # One key, routed to 70+ providers. Anything ending in ":free" is
+        # a permanently-free model — no credit card needed to call these
+        # specific ids (get a key at openrouter.ai/keys). Non-":free"
+        # model ids also work here if a key has paid credits.
+        "model_samples": [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "deepseek/deepseek-r1:free",
+            "deepseek/deepseek-chat-v3.1:free",
+            "google/gemini-2.0-flash-exp:free",
+            "qwen/qwen3-235b-a22b:free",
+            "mistralai/mistral-small-3.2-24b-instruct:free",
+        ],
+        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
     },
 }
 
