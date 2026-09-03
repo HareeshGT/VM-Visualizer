@@ -1907,6 +1907,19 @@ class EC2FileManager(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
+    def _new_file(self):
+        if not self.sftp:
+            return
+        name, ok = QInputDialog.getText(self, "New File", "File name:")
+        if not ok or not name.strip():
+            return
+        try:
+            remote = self.current_path.rstrip("/") + "/" + name.strip()
+            self.sftp.open(remote, "w").close()
+            self._refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
     def _delete(self):
         item = self.file_list.currentItem()
         if not item:
@@ -2319,6 +2332,7 @@ class EC2FileManager(QMainWindow):
 
         menu.addSeparator()
         menu.addAction("⬆  Upload File", self._upload)
+        menu.addAction("📄  New File",   self._new_file)
         menu.addAction("➕  New Folder",  self._new_folder)
         menu.addSeparator()
         menu.addAction("↺  Refresh", self._refresh)
