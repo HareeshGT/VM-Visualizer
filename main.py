@@ -77,17 +77,8 @@ def main() -> int:
         window = EC2FileManager()
         window_ref["window"] = window
 
-        # EC2FileManager only calls self.resize(...) in __init__, never
-        # move(...), so centre it ourselves so it doesn't land at (0, 0).
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            avail = screen.availableGeometry()
-            w, h  = window.width(), window.height()
-            window.move(avail.x() + (avail.width() - w) // 2,
-                        avail.y() + (avail.height() - h) // 2)
-
         window.setWindowOpacity(0.0)
-        window.show()
+        window.showFullScreen()
 
         fade_in = QPropertyAnimation(window, b"windowOpacity", window)
         fade_in.setStartValue(0.0)
