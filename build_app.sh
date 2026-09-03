@@ -401,7 +401,7 @@ CMD=(
     # AI provider support
     --hidden-import=ai_assist
 
-    # Kubernetes OpsMind
+    # Kubernetes Ops Mind
     --hidden-import=k8s_ai_ops
 
     # Voice input
@@ -596,7 +596,7 @@ echo "Deckhand installed successfully!"
 echo "=========================================="
 echo
 echo "Included:"
-echo "  ✓ Kubernetes OpsMind"
+echo "  ✓ Kubernetes Ops Mind"
 echo "  ✓ Google Web Speech voice input"
 echo "  ✓ PyAudio microphone support"
 echo "  ✓ Native FLAC support"

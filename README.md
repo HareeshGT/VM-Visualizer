@@ -96,7 +96,7 @@ It combines SSH/SFTP-based remote file management, a built-in code editor, an in
 - Events
 - Terminal
 - Tunnels
-- **OpsMind**
+- **Ops Mind**
 
 Individual Kubernetes sub-tabs can be hidden per user from Settings.
 
@@ -119,9 +119,9 @@ The in-tab terminal is ready for `kubectl` commands and uses the active Kubernet
 
 ---
 
-# Kubernetes OpsMind
+# Kubernetes Ops Mind
 
-The **OpsMind** tab provides natural-language Kubernetes operations through the configured AI provider.
+The **Ops Mind** tab provides natural-language Kubernetes operations through the configured AI provider.
 
 The AI is used to interpret the user's request into a small, allow-listed operation schema. The application itself validates the result and constructs the actual `kubectl` command.
 
@@ -129,7 +129,7 @@ The AI does **not** provide an executable shell command directly.
 
 ### Supported AI Operations
 
-The current OpsMind command interpreter supports:
+The current Ops Mind command interpreter supports:
 
 - `scale`
 - `restart`
@@ -206,7 +206,7 @@ For relative scaling, the application first reads the **live replica count from 
 
 ### Operation History
 
-OpsMind remembers recent operations using the application's persistent settings.
+Ops Mind remembers recent operations using the application's persistent settings.
 
 History includes information such as:
 
@@ -240,16 +240,16 @@ The stored history survives application restarts.
 
 ### API-Key Access Lock
 
-OpsMind is only available when the currently selected AI provider has an API key configured.
+Ops Mind is only available when the currently selected AI provider has an API key configured.
 
 When no API key is available:
 
-- The OpsMind content is blurred.
+- The Ops Mind content is blurred.
 - The controls are covered by a lock overlay.
 - The user is told to add an API key under `Settings → AI`.
 - AI operations and voice commands cannot be executed.
 
-When a valid key is configured, the OpsMind tab becomes available again.
+When a valid key is configured, the Ops Mind tab becomes available again.
 
 ### AI Error Handling
 
@@ -269,7 +269,7 @@ are given a descriptive dialog title while the complete provider response remain
 
 # Voice-Controlled Kubernetes Operations
 
-OpsMind also supports microphone-based voice commands.
+Ops Mind also supports microphone-based voice commands.
 
 ## Speech-to-Text Engine
 
@@ -292,7 +292,7 @@ Google Web Speech
    ↓
 Plain text
    ↓
-OpsMind interpreter
+Ops Mind interpreter
    ↓
 Validated Kubernetes action
    ↓
@@ -305,14 +305,14 @@ Only the resulting text is passed to the configured AI provider.
 
 Voice recording can be controlled with:
 
-- **Voice button** in the OpsMind panel.
+- **Voice button** in the Ops Mind panel.
 - **Ctrl+Shift+Space** keyboard shortcut.
 
 The button changes to a stop action while recording.
 
 ### Live Microphone Indicator
 
-While recording, OpsMind shows a live microphone activity meter.
+While recording, Ops Mind shows a live microphone activity meter.
 
 The meter is calculated directly from the microphone PCM samples and does not use AI.
 
@@ -378,7 +378,7 @@ by default.
 | `main.py` | Application entry point. Builds the Qt application/palette, shows the splash-to-window transition, and creates the main window. |
 | `main_window.py` | `EC2FileManager` — main application window, tab layout, file-manager orchestration, dashboard integration, and settings flow. |
 | `dashboard_tab.py` | Live VM + Kubernetes node dashboard (`DashboardTab`, `NodeDetailWindow`). |
-| `kubernetes_tab.py` | `KubernetesTab` — Kubernetes resources, terminal, tunneling, and OpsMind integration. |
+| `kubernetes_tab.py` | `KubernetesTab` — Kubernetes resources, terminal, tunneling, and Ops Mind integration. |
 | `k8s_ai_ops.py` | AI-powered Kubernetes operations, persistent operation history, voice input, microphone level indicator, API-key gating, and safe `kubectl` execution. |
 | `k8s_cards.py` | Card-style widgets for Kubernetes resource lists. |
 | `dialogs.py` | Modal dialogs including Connect, Connecting, FileTransfer, LogViewer, ContainerPicker, Exec, FileEditor, FileExec, MediaPlayer, Search, and ManageTunnelServices. |
@@ -413,7 +413,7 @@ paramiko>=3.0
 
 ## Voice Input Packages
 
-Kubernetes OpsMind voice input additionally requires:
+Kubernetes Ops Mind voice input additionally requires:
 
 ```text
 SpeechRecognition>=3.10,<4
@@ -548,7 +548,7 @@ dist/Deckhand.app
 | `--hidden-import=paramiko` | Explicitly includes Paramiko. |
 | `--collect-all=paramiko` | Collects Paramiko submodules, data, and binaries that may not be detected automatically. |
 | `--hidden-import=ai_assist` | Ensures the AI provider module is included. |
-| `--hidden-import=k8s_ai_ops` | Ensures the Kubernetes OpsMind module is included. |
+| `--hidden-import=k8s_ai_ops` | Ensures the Kubernetes Ops Mind module is included. |
 | `--hidden-import=speech_recognition` | Explicitly includes the voice recognition dependency. |
 | `--hidden-import=pyaudio` | Explicitly includes the microphone/PortAudio Python extension. |
 | `main.py` | Application entry point. |
@@ -599,7 +599,7 @@ The following are still external/runtime requirements:
 - OS-level permissions such as microphone access.
 - Internet access when using Google Web Speech.
 - Access to AWS/Kubernetes systems and the required SSH credentials.
-- The configured AI provider's API availability and quota when using OpsMind.
+- The configured AI provider's API availability and quota when using Ops Mind.
 
 ---
 
@@ -609,15 +609,15 @@ The following are still external/runtime requirements:
 - Use `build_app.sh` when you want the complete cross-platform dependency/build flow.
 - Delete `build/` and `dist/` when troubleshooting packaging issues, then rebuild from scratch.
 - New modules that use dynamic imports may require additional PyInstaller hidden-import or collection options.
-- OpsMind operations are validated against allow-listed actions/resources before any `kubectl` command is constructed.
+- Ops Mind operations are validated against allow-listed actions/resources before any `kubectl` command is constructed.
 - The AI never directly supplies executable shell commands.
 - Relative scaling is calculated from the live Kubernetes replica count immediately before the scale operation.
 - Operation history is persisted locally and is used for contextual follow-up requests.
-- General conversational/status questions supported by OpsMind are handled locally when possible, so they do not unnecessarily consume AI provider quota.
+- General conversational/status questions supported by Ops Mind are handled locally when possible, so they do not unnecessarily consume AI provider quota.
 
 ---
 
-# Example OpsMind Commands
+# Example Ops Mind Commands
 
 ```text
 scale deployment my-app to 5

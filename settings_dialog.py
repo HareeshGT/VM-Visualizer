@@ -164,7 +164,7 @@ class SettingsDialog(QDialog):
         v.addWidget(line)
         v.addSpacing(4)
 
-        protected_lbl = QLabel("Protected namespaces (OpsMind)")
+        protected_lbl = QLabel("Protected namespaces (Ops Mind)")
         protected_lbl.setStyleSheet(f"color: {T['TEXT_PRIMARY']}; font-weight: 600;")
         v.addWidget(protected_lbl)
 
@@ -299,7 +299,7 @@ class SettingsDialog(QDialog):
         # Kubernetes tab visibility
         save_settings(k8s_hidden_tabs=self.hidden_k8s_tabs())
 
-        # Protected namespaces (OpsMind confirmation gate)
+        # Protected namespaces (Ops Mind confirmation gate)
         patterns = [p.strip() for p in self.protected_ns_edit.text().split(",")]
         k8s_ai_ops.save_protected_namespaces(patterns)
 
